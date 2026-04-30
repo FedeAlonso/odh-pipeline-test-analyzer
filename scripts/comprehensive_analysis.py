@@ -163,6 +163,106 @@ def get_image_metadata_with_tracer(image_uri: str) -> dict:
     return metadata
 
 
+async def inspect_cluster_image_ages(inspector, namespaces: list) -> list:
+    """Get build dates for all unique images deployed on the cluster via skopeo."""
+    seen_images = {}
+    for ns in namespaces:
+        deployments = await inspector.get_deployments(ns)
+        for dep in deployments:
+            dep_name = dep.get('metadata', {}).get('name', '')
+            containers = dep.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+            for c in containers:
+                image = c.get('image', '')
+                if not image:
+                    continue
+                if dep_name not in seen_images:
+                    seen_images[dep_name] = {'image': image, 'namespace': ns}
+
+    results = []
+    tasks = []
+    for dep_name, info in sorted(seen_images.items()):
+        tasks.append(_inspect_single_image(dep_name, info['image'], info['namespace']))
+    results = await asyncio.gather(*tasks)
+    return [r for r in results if r]
+
+
+async def _inspect_single_image(dep_name: str, image: str, namespace: str) -> dict:
+    entry = {
+        'component': dep_name,
+        'namespace': namespace,
+        'image': image,
+        'build_date': None,
+        'age_days': None,
+        'age_str': '',
+        'commit': '',
+    }
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'skopeo', 'inspect', '--override-arch', 'amd64', '--override-os', 'linux',
+            '--no-tags', f"docker://{image}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode == 0:
+            import json as _json
+            data = _json.loads(stdout)
+            labels = data.get('Labels', {})
+            build_date = labels.get('build-date', labels.get('org.opencontainers.image.created', ''))
+            vcs_ref = labels.get('vcs-ref', labels.get('org.opencontainers.image.revision', ''))
+            if build_date:
+                entry['build_date'] = build_date[:19]
+                bd = datetime.fromisoformat(build_date.replace('Z', '+00:00').replace('+00:00+00:00', '+00:00'))
+                age = datetime.now(bd.tzinfo or None) - bd if bd.tzinfo else datetime.utcnow() - bd
+                entry['age_days'] = age.days
+                if age.days > 0:
+                    entry['age_str'] = f"{age.days}d {age.seconds // 3600}h"
+                else:
+                    entry['age_str'] = f"{age.seconds // 3600}h {(age.seconds % 3600) // 60}m"
+            if vcs_ref:
+                entry['commit'] = vcs_ref[:12]
+    except Exception:
+        pass
+    return entry
+
+
+def extract_expected_version(deployed_images: dict, image_metadata: dict) -> str:
+    """Extract the expected RHOAI/ODH version from the fbc_fragment image tag or tracer metadata."""
+    fbc_meta = image_metadata.get('fbc_fragment', {})
+    if fbc_meta.get('rhoai_version'):
+        return fbc_meta['rhoai_version']
+
+    fbc_uri = deployed_images.get('fbc_fragment', '') or ''
+    tag_match = re.search(r':rhoai-(\d+\.\d+)', fbc_uri)
+    if tag_match:
+        return tag_match.group(1)
+    return ''
+
+
+def detect_version_mismatch(expected_version: str, installed_csv_version: str) -> dict:
+    """Compare expected version (from fbc_fragment) against installed operator CSV version."""
+    result = {
+        'has_mismatch': False,
+        'expected_version': expected_version,
+        'installed_version': installed_csv_version or 'unknown',
+        'message': '',
+    }
+    if not expected_version or not installed_csv_version:
+        return result
+
+    expected_normalized = re.sub(r'^v', '', expected_version)
+    installed_normalized = re.sub(r'^v', '', installed_csv_version)
+    expected_major_minor = re.match(r'(\d+\.\d+)', expected_normalized)
+    installed_major_minor = re.match(r'(\d+\.\d+)', installed_normalized)
+
+    if expected_major_minor and installed_major_minor:
+        if expected_major_minor.group(1) != installed_major_minor.group(1):
+            result['has_mismatch'] = True
+            result['message'] = (
+                f"FBC fragment targets {expected_version} but operator installed is {installed_csv_version}"
+            )
+    return result
+
+
 def parse_cypress_console_results(console_output: str) -> tuple:
     """
     Parse Cypress test results from Jenkins console output.
@@ -1179,7 +1279,7 @@ def generate_html_report(
     pipeline_failure, image_metadata, screenshots_by_stage, timed_out_stages,
     stage_timeout_minutes, results_by_stage, test_stages_ran,
     analysis_with_reruns, cluster_analysis, recent_merges, git_analysis,
-    all_tests_by_stage=None,
+    all_tests_by_stage=None, version_mismatch=None, cluster_image_ages=None,
 ) -> str:
     import html as html_mod
     esc = html_mod.escape
@@ -1376,6 +1476,43 @@ def generate_html_report(
           </table></div>
         </section>"""
 
+    vm = version_mismatch or {}
+    if vm.get('has_mismatch'):
+        images_section += f"""
+        <section class="section">
+          <div class="card" style="border:2px solid #ff4444;background:rgba(255,68,68,0.08);">
+            <h3 style="color:#ff4444;margin-top:0;">🚨 Version Mismatch Detected</h3>
+            <p><strong>Expected (FBC fragment):</strong> <code>{esc(vm['expected_version'])}</code></p>
+            <p><strong>Installed (operator CSV):</strong> <code>{esc(vm['installed_version'])}</code></p>
+            <p style="margin-bottom:0;">{esc(vm['message'])}</p>
+          </div>
+        </section>"""
+
+    cia = cluster_image_ages or []
+    if cia:
+        age_rows = []
+        for img in sorted(cia, key=lambda x: -(x.get('age_days') or 0)):
+            if not img.get('build_date'):
+                continue
+            age_d = img.get('age_days') or 0
+            age_cls = ' style="color:#ff4444;font-weight:700"' if age_d > 14 else (' style="color:#ffa500"' if age_d > 7 else '')
+            age_rows.append(f"""
+            <tr>
+              <td><strong>{esc(img['component'])}</strong></td>
+              <td>{esc(img['build_date'])}</td>
+              <td{age_cls}>{esc(img['age_str'])}</td>
+              <td class="mono">{esc(img.get('commit',''))}</td>
+            </tr>""")
+        if age_rows:
+            images_section += f"""
+        <section class="section">
+          <h2>Cluster Image Ages</h2>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Component</th><th>Build Date</th><th>Age</th><th>Commit</th></tr></thead>
+            <tbody>{"".join(age_rows)}</tbody>
+          </table></div>
+        </section>"""
+
     failure_cards = []
     for fa in analysis_with_reruns.get("failure_analyses", []):
         f = fa.failure
@@ -1402,12 +1539,29 @@ def generate_html_report(
             stack_block = f'<details><summary>Stack trace</summary><pre class="code-block">{esc(f.stack_trace[:3000])}</pre></details>'
 
         rerun_html = ""
+        rerun_explanation_html = ""
         rerun = getattr(fa, "rerun_result", None)
-        if rerun and isinstance(rerun, dict):
-            rr_pass = rerun.get("passed", False)
-            rr_cls = "tag-pass" if rr_pass else "tag-fail-sm"
-            rr_label = "PASSED on rerun" if rr_pass else "FAILED on rerun"
+        if rerun and isinstance(rerun, dict) and rerun.get('attempted'):
+            rr_pass = rerun.get("success", False)
+            gi_for_class = git_analysis.get(f.test_file, {})
+            classification = classify_failure_result(rerun, gi_for_class)
+            if rr_pass:
+                rr_cls = "tag-rerun-pass"
+                rr_label = "Pass on re-run"
+            else:
+                rr_cls = "tag-fail-sm"
+                rr_label = "FAILED on rerun"
             rerun_html = f' <span class="{rr_cls}">{rr_label}</span>'
+            ran_on = f"build commit {rerun.get('ran_at_commit', 'unknown')[:8]}" if not rerun.get('ran_on_main', True) else "main branch"
+            duration = rerun.get('duration', 0)
+            rerun_explanation_html = f'<div class="rerun-explanation"><strong>Rerun ({ran_on}):</strong> {esc(classification["explanation"])}'
+            if duration > 0:
+                rerun_explanation_html += f' <em>({duration:.1f}s)</em>'
+            if not rr_pass:
+                rerun_error = rerun.get('error_output', '')
+                if rerun_error:
+                    rerun_explanation_html += f'<details><summary>Rerun error</summary><pre class="code-block">{esc(rerun_error[:500])}</pre></details>'
+            rerun_explanation_html += '</div>'
 
         git_html = ""
         gi = git_analysis.get(f.test_file)
@@ -1432,20 +1586,29 @@ def generate_html_report(
         if video_local:
             media_block += f'<details><summary>Video</summary><video controls preload="none" class="artifact-video"><source src="{esc(video_local)}" type="video/mp4"></video></details>'
 
+        card_status = "retry" if is_rp else "failed"
         failure_cards.append(f"""
-        <div class="card failure-card">
+        <div class="card failure-card" data-status="{card_status}">
           <div class="failure-header">
             <span class="failure-name">{esc(fname)}</span>{rerun_html}
           </div>
           <div class="failure-badges">{badges}</div>
-          {media_block}{err_block}{stack_block}{git_html}
+          {rerun_explanation_html}{media_block}{err_block}{stack_block}{git_html}
         </div>""")
 
     failures_section = ""
     if failure_cards:
+        real_count = sum(1 for fa in analysis_with_reruns.get("failure_analyses", []) if not getattr(fa.failure, "_is_retry_pass", False))
+        retry_count = len(failure_cards) - real_count
         failures_section = f"""
         <section class="section">
           <h2>Detailed Failures ({len(failure_cards)})</h2>
+          <div class="filter-bar" id="failure-filter-bar">
+            <span class="filter-label">Filter:</span>
+            <button class="failure-filter-btn active" data-ffilter="all">All ({len(failure_cards)})</button>
+            <button class="failure-filter-btn active" data-ffilter="failed"><span class="icon-fail">&#10008;</span> Failed ({real_count})</button>
+            <button class="failure-filter-btn active" data-ffilter="retry"><span class="icon-warn">&#9888;</span> Passed on retry ({retry_count})</button>
+          </div>
           {"".join(failure_cards)}
         </section>"""
 
@@ -1576,8 +1739,18 @@ code,.mono {{ font-family:var(--mono); font-size:0.9em; }}
   background:#7c2d12; color:var(--orange); font-weight:600; }}
 .tag-pass {{ display:inline-block; padding:2px 10px; border-radius:10px; font-size:0.8rem;
   background:var(--green); color:#1a1a2e; font-weight:600; }}
+.tag-rerun-pass {{ display:inline-block; padding:2px 10px; border-radius:10px; font-size:0.8rem;
+  background:#39ff14; color:#1a1a2e; font-weight:700; text-shadow:0 0 6px rgba(57,255,20,0.4); }}
 .tag-fail-sm {{ display:inline-block; padding:2px 10px; border-radius:10px; font-size:0.8rem;
   background:var(--red); color:#fff; font-weight:600; }}
+.rerun-explanation {{ margin:.5rem 0; padding:.5rem .8rem; border-left:3px solid var(--blue);
+  background:var(--bg2); border-radius:0 6px 6px 0; font-size:0.88rem; }}
+.failure-filter-btn {{ background:var(--card); border:1px solid var(--border); border-radius:16px; padding:4px 12px;
+  font-size:0.8rem; color:var(--text2); cursor:pointer; transition:all .15s; font-family:inherit; }}
+.failure-filter-btn:hover {{ border-color:var(--blue); }}
+.failure-filter-btn.active {{ background:var(--bg3); border-color:var(--blue); color:var(--text); }}
+.failure-filter-btn.active[data-ffilter="failed"] {{ border-color:var(--red); }}
+.failure-filter-btn.active[data-ffilter="retry"] {{ border-color:var(--yellow); }}
 .legend {{ margin-top:.8rem; font-size:0.85rem; }}
 .legend summary {{ color:var(--text2); cursor:pointer; font-size:0.85rem; }}
 .legend-grid {{ display:flex; gap:1.5rem; flex-wrap:wrap; padding:.6rem 0; }}
@@ -1676,7 +1849,7 @@ document.querySelectorAll('.artifact-thumb a').forEach(a=>{{
 }});
 document.addEventListener('keydown',e=>{{if(e.key==='Escape')document.getElementById('lightbox').style.display='none'}});
 
-// Filter logic
+// Filter logic - stage breakdown
 (function(){{
   const filters={{}};
   document.querySelectorAll('.filter-btn[data-filter]').forEach(btn=>{{
@@ -1695,6 +1868,29 @@ document.addEventListener('keydown',e=>{{if(e.key==='Escape')document.getElement
       }});
       document.querySelectorAll('li[data-status]').forEach(li=>{{
         li.style.display=filters[li.dataset.status]?'':'none';
+      }});
+    }});
+  }});
+}})();
+// Filter logic - detailed failure cards
+(function(){{
+  const ff={{}};
+  document.querySelectorAll('.failure-filter-btn[data-ffilter]').forEach(btn=>{{
+    const f=btn.dataset.ffilter;
+    if(f!=='all') ff[f]=true;
+    btn.addEventListener('click',()=>{{
+      if(f==='all'){{
+        for(const k in ff) ff[k]=true;
+      }} else {{
+        ff[f]=!ff[f];
+      }}
+      document.querySelectorAll('.failure-filter-btn[data-ffilter]').forEach(b=>{{
+        const bf=b.dataset.ffilter;
+        if(bf==='all') b.classList.toggle('active',Object.values(ff).every(v=>v));
+        else b.classList.toggle('active',ff[bf]);
+      }});
+      document.querySelectorAll('.failure-card[data-status]').forEach(card=>{{
+        card.style.display=ff[card.dataset.status]?'':'none';
       }});
     }});
   }});
@@ -2179,25 +2375,31 @@ def is_nightly_cron_build(console_output: str) -> dict:
 async def main():
     import sys
 
-    if len(sys.argv) < 2:
-        print("Usage: python comprehensive_analysis.py <build_number|latest> [odh|rhoai] [options]")
-        print("\nOptions:")
-        print("  --enable-trend            Enable trend analysis (for nightly automation)")
-        print("  --no-artifacts-download   Skip downloading screenshots/videos from Jenkins")
-        print("                            (report will not have embedded images or local videos)")
-        print("  --skip-jira               Skip Jira lock ticket and result publishing")
-        print("\nExamples:")
-        print("  python comprehensive_analysis.py 3565 odh")
-        print("  python comprehensive_analysis.py latest rhoai")
-        print("  python comprehensive_analysis.py latest rhoai --no-artifacts-download")
-        print("  python comprehensive_analysis.py 3565 odh --enable-trend")
-        return
+    import argparse
 
-    build_arg = sys.argv[1]
-    variant = sys.argv[2].upper() if len(sys.argv) > 2 else "ODH"
-    enable_trend_analysis = '--enable-trend' in sys.argv
-    download_artifacts = '--no-artifacts-download' not in sys.argv
-    skip_jira = '--skip-jira' in sys.argv
+    parser = argparse.ArgumentParser(
+        description="Comprehensive RHOAI/ODH nightly build analyzer",
+        usage="python comprehensive_analysis.py <build_number|latest> [odh|rhoai] [options]"
+    )
+    parser.add_argument('build', help="Build number or 'latest'")
+    parser.add_argument('variant', nargs='?', default='ODH', help="Platform variant (default: ODH)")
+    parser.add_argument('--enable-trend', action='store_true', help="Enable trend analysis")
+    parser.add_argument('--no-artifacts-download', action='store_true', help="Skip downloading screenshots/videos")
+    parser.add_argument('--skip-jira', action='store_true', help="Skip Jira lock ticket and publishing")
+    parser.add_argument('--skip-rerun', action='store_true', help="Skip test reruns")
+    parser.add_argument('--skip-slack', action='store_true', help="Skip Slack message posting")
+    parser.add_argument('-y', '--yes', action='store_true', help="Auto-accept prompts (non-interactive mode)")
+
+    args = parser.parse_args()
+
+    build_arg = args.build
+    variant = args.variant.upper()
+    enable_trend_analysis = args.enable_trend
+    download_artifacts = not args.no_artifacts_download
+    skip_jira = args.skip_jira
+    skip_rerun = args.skip_rerun
+    skip_slack = args.skip_slack
+    auto_yes = args.yes or not sys.stdin.isatty()
     
     # Create jenkins client for build lookup
     jenkins_cli = jenkins_client.JenkinsClient(
@@ -2309,10 +2511,13 @@ async def main():
                             print()
                             break
                 
-                response = input("Continue with the old build anyway? [y/N]: ")
-                if response.lower() != 'y':
-                    print("Cancelled. Run with 'latest' to auto-find the newest build.")
-                    sys.exit(0)
+                if auto_yes:
+                    print("Auto-accepting old build (--yes / non-interactive mode)")
+                else:
+                    response = input("Continue with the old build anyway? [y/N]: ")
+                    if response.lower() != 'y':
+                        print("Cancelled. Run with 'latest' to auto-find the newest build.")
+                        sys.exit(0)
             
             # Check if build matches the requested variant
             if target_description not in description:
@@ -2321,10 +2526,13 @@ async def main():
                 print(f"   Expected to contain: {target_description}")
                 print()
                 
-                response = input("Continue anyway? [y/N]: ")
-                if response.lower() != 'y':
-                    print("Cancelled.")
-                    sys.exit(0)
+                if auto_yes:
+                    print("Auto-accepting variant mismatch (--yes / non-interactive mode)")
+                else:
+                    response = input("Continue anyway? [y/N]: ")
+                    if response.lower() != 'y':
+                        print("Cancelled.")
+                        sys.exit(0)
             else:
                 print(f"✅ Build #{build_num} is a {variant} build from {hours_ago:.1f} hours ago")
                 print()
@@ -2366,9 +2574,13 @@ async def main():
         print("⏭️  Skipping Jira lock (--skip-jira)")
     else:
         try:
-            jira_enabled, lock_ticket_key = await check_or_create_lock(build_num, name, build_date_str)
+            jira_enabled, lock_ticket_key = await check_or_create_lock(build_num, name, build_date_str, auto_yes=auto_yes)
         except Exception as e:
             print(f"⚠️  Jira lock check failed ({e}). Continuing without lock...")
+    if skip_slack:
+        print("⏭️  Skipping Slack (--skip-slack)")
+    if skip_rerun:
+        print("⏭️  Skipping test reruns (--skip-rerun)")
 
     if not jira_enabled:
         jira = None
@@ -2597,6 +2809,44 @@ async def main():
 
         # Check ALL namespaces
         all_namespaces = await check_all_namespaces(inspector)
+
+    # Step 5b: Detect version mismatch (expected vs installed operator)
+    version_mismatch = {'has_mismatch': False}
+    expected_version = extract_expected_version(deployed_images, image_metadata)
+    if cluster_analysis and inspector.logged_in:
+        try:
+            operator_ns = "redhat-ods-operator" if name == "RHOAI" else "openshift-operators"
+            installed_csv_version = await inspector.get_operator_csv_version(operator_ns)
+            if installed_csv_version:
+                version_mismatch = detect_version_mismatch(expected_version, installed_csv_version)
+                if version_mismatch['has_mismatch']:
+                    print(f"   🚨 VERSION MISMATCH: {version_mismatch['message']}")
+                else:
+                    print(f"   ✅ Operator version matches: {installed_csv_version}")
+            else:
+                print(f"   ⚠️  Could not determine installed operator version")
+        except Exception as e:
+            print(f"   ⚠️  Version check failed: {e}")
+
+    # Step 5c: Inspect cluster image ages
+    cluster_image_ages = []
+    if cluster_analysis and inspector.logged_in:
+        try:
+            operator_ns = "redhat-ods-operator" if name == "RHOAI" else "openshift-operators"
+            image_namespaces = list(dict.fromkeys([namespace, "redhat-ods-applications", operator_ns]))
+            print(f"\n[5c/11] 🐳 Inspecting cluster image ages...")
+            cluster_image_ages = await inspect_cluster_image_ages(
+                inspector, image_namespaces
+            )
+            inspected = sum(1 for i in cluster_image_ages if i['build_date'])
+            print(f"   ✅ Inspected {inspected}/{len(cluster_image_ages)} images")
+            old_images = [i for i in cluster_image_ages if i['age_days'] is not None and i['age_days'] > 7]
+            if old_images:
+                print(f"   ⚠️  {len(old_images)} image(s) older than 7 days:")
+                for img in sorted(old_images, key=lambda x: x['age_days'] or 0, reverse=True):
+                    print(f"      • {img['component']}: {img['age_str']} (built {img['build_date']})")
+        except Exception as e:
+            print(f"   ⚠️  Image age inspection failed: {e}")
 
     # Step 6: Fetch test results, stages, and process failures
     print(f"\n[6/11] 📊 Processing test results and failures...")
@@ -2907,6 +3157,14 @@ async def main():
         failures=failures
     )
 
+    # Determine the exact commit used in the nightly build (from downstream repo)
+    build_commit = (
+        image_metadata.get('fbc_fragment', {}).get('commit_sha_full')
+        or image_metadata.get('dashboard', {}).get('commit_sha_full')
+    )
+    if build_commit:
+        print(f"\n   📌 Build commit (downstream): {build_commit[:12]}")
+
     # Step 9: Analyze with Jira
     print(f"\n[7/11] 🐛 Searching Jira for related bugs...")
     analyzer = failure_analyzer.FailureAnalyzer(
@@ -2932,21 +3190,29 @@ async def main():
     # Check if this is a post-test failure (like Post Actions)
     is_post_test_failure = pipeline_failure.get('is_post_test_failure', False)
     
-    if is_pre_test_failure:
-        skip_reason = f"Pipeline deployment failure: {pipeline_failure['failed_step']}"
-    elif len(failures) == 0:
-        skip_reason = "No failures to rerun"
-    elif len(failures) < 5:
-        # Rerun all failures when < 5
-        should_rerun = True
-        failures_to_rerun = failures
-        print(f"\n[8/11] 🔄 Rerunning all {len(failures)} failing test(s)...")
-    else:
-        # When >= 5 failures, group by exception and rerun one per group
-        should_rerun = True
-        exception_groups = group_failures_by_exception(failures)
+    # Exclude "passed on retry" tests — they already passed, no need to rerun
+    real_failures = [f for f in failures if not getattr(f, '_is_retry_pass', False)]
+    retry_passed = [f for f in failures if getattr(f, '_is_retry_pass', False)]
+    if retry_passed:
+        print(f"\n   ⏭ Excluding {len(retry_passed)} test(s) that passed on retry from reruns")
 
-        print(f"\n[8/11] 🔄 {len(failures)} failures detected - grouping by exception type...")
+    if skip_rerun:
+        skip_reason = "Reruns disabled (--skip-rerun)"
+    elif is_pre_test_failure:
+        skip_reason = f"Pipeline deployment failure: {pipeline_failure['failed_step']}"
+    elif len(real_failures) == 0:
+        skip_reason = "No real failures to rerun (all passed on retry)"
+    elif len(real_failures) < 5:
+        # Rerun all real failures when < 5
+        should_rerun = True
+        failures_to_rerun = real_failures
+        print(f"\n[8/11] 🔄 Rerunning all {len(real_failures)} failing test(s)...")
+    else:
+        # When >= 5 real failures, group by exception and rerun one per group
+        should_rerun = True
+        exception_groups = group_failures_by_exception(real_failures)
+
+        print(f"\n[8/11] 🔄 {len(real_failures)} failures detected - grouping by exception type...")
         print(f"   Found {len(exception_groups)} exception type(s):")
 
         for exc_type, group_failures in exception_groups.items():
@@ -2972,11 +3238,12 @@ async def main():
             failures=failures_to_rerun
         )
 
-        # Create a fresh analyzer with reruns enabled
+        # Create a fresh analyzer with reruns enabled, pinned to the build commit
         analyzer_with_reruns = failure_analyzer.FailureAnalyzer(
             jira_client=jira,
             enable_test_rerun=True,
-            frontend_repo_path=frontend_repo
+            frontend_repo_path=frontend_repo,
+            build_commit=build_commit
         )
         
         # Analyze only the failures we want to rerun
@@ -3267,6 +3534,32 @@ async def main():
             lines.append(f"- ✅ Image commit matches current main branch")
         lines.append("")
 
+    if version_mismatch.get('has_mismatch'):
+        lines.append("### 🚨 Version Mismatch")
+        lines.append("")
+        lines.append(f"| | Version |")
+        lines.append(f"|---|---|")
+        lines.append(f"| **Expected (FBC fragment)** | `{version_mismatch['expected_version']}` |")
+        lines.append(f"| **Installed (operator CSV)** | `{version_mismatch['installed_version']}` |")
+        lines.append("")
+        lines.append(f"> ⚠️ {version_mismatch['message']}")
+        lines.append("")
+
+    if cluster_image_ages:
+        inspected = [i for i in cluster_image_ages if i.get('build_date')]
+        if inspected:
+            lines.append("### 🐳 Cluster Image Ages")
+            lines.append("")
+            lines.append("| Component | Build Date | Age | Commit |")
+            lines.append("|---|---|---|---|")
+            for img in sorted(inspected, key=lambda x: -(x.get('age_days') or 0)):
+                age_flag = " ⚠️" if (img.get('age_days') or 0) > 7 else ""
+                lines.append(
+                    f"| **{img['component']}** | `{img['build_date']}` "
+                    f"| {img['age_str']}{age_flag} | `{img.get('commit', '')}` |"
+                )
+            lines.append("")
+
     lines.append("---")
     lines.append("")
 
@@ -3512,6 +3805,115 @@ async def main():
         lines.append("---")
         lines.append("")
 
+    # Test Rerun Results - dedicated section
+    reruns_attempted = [
+        fa for fa in analysis_with_reruns['failure_analyses']
+        if hasattr(fa, 'rerun_result') and fa.rerun_result and fa.rerun_result.get('attempted')
+    ]
+    reruns_not_attempted = [
+        fa for fa in analysis_with_reruns['failure_analyses']
+        if not (hasattr(fa, 'rerun_result') and fa.rerun_result and fa.rerun_result.get('attempted'))
+    ]
+
+    lines.append("## 🔄 Test Rerun Results")
+    lines.append("")
+
+    if not should_rerun:
+        lines.append(f"⏭ **Reruns skipped:** {skip_reason}")
+        lines.append("")
+    elif not reruns_attempted:
+        lines.append("⚠️ **No reruns were executed**")
+        lines.append("")
+    else:
+        # Build commit info
+        if build_commit:
+            lines.append(f"**📌 Rerun commit:** `{build_commit[:12]}` (downstream)")
+        else:
+            lines.append("**📌 Rerun commit:** `main` branch (no build commit available)")
+        lines.append("")
+
+        # Strategy
+        if len(real_failures) >= 5:
+            exception_groups = group_failures_by_exception(real_failures)
+            lines.append(f"**Strategy:** {len(real_failures)} real failures grouped into {len(exception_groups)} exception type(s) — one representative test rerun per group")
+        else:
+            lines.append(f"**Strategy:** All {len(real_failures)} real failure(s) rerun individually")
+        if retry_passed:
+            lines.append(f"- {len(retry_passed)} test(s) excluded (passed on retry)")
+        lines.append("")
+
+        # Summary table
+        rerun_passed = [fa for fa in reruns_attempted if fa.rerun_result.get('success')]
+        rerun_failed = [fa for fa in reruns_attempted if not fa.rerun_result.get('success')]
+        lines.append(f"| Metric | Count |")
+        lines.append(f"|--------|-------|")
+        lines.append(f"| Tests rerun | {len(reruns_attempted)} |")
+        lines.append(f"| Passed on rerun | {len(rerun_passed)} |")
+        lines.append(f"| Failed on rerun | {len(rerun_failed)} |")
+        lines.append("")
+
+        # Per-test rerun details
+        lines.append("### Rerun Details")
+        lines.append("")
+
+        for fa in reruns_attempted:
+            rerun = fa.rerun_result
+            test_file_name = Path(fa.failure.test_file).name if fa.failure.test_file else fa.failure.test_name
+            git_info = git_analysis.get(fa.failure.test_file, {})
+            classification = classify_failure_result(rerun, git_info)
+
+            if rerun.get('success'):
+                status_icon = "✅"
+                status_text = f"PASSED ({rerun.get('duration', 0):.1f}s)"
+            elif rerun.get('exit_code') == -1:
+                status_icon = "⏱"
+                status_text = f"TIMED OUT ({rerun.get('duration', 0):.0f}s)"
+            else:
+                status_icon = "❌"
+                status_text = f"FAILED (exit code {rerun.get('exit_code', 'N/A')}, {rerun.get('duration', 0):.1f}s)"
+
+            lines.append(f"**{status_icon} {test_file_name}** — {status_text}")
+            lines.append(f"- {classification['emoji']} **Classification:** {classification['classification'].upper().replace('_', ' ')}")
+            lines.append(f"- {classification['explanation']}")
+            lines.append(f"- **Confidence:** {classification['confidence']}")
+
+            if classification['action_required']:
+                lines.append(f"- **Action:** {classification['suggested_action']}")
+
+            # Error comparison for failed reruns
+            if not rerun.get('success'):
+                rerun_error = rerun.get('error_output', '')
+                if rerun_error:
+                    comparison = compare_errors(fa.failure.error_message, rerun_error)
+                    if comparison['same_error']:
+                        lines.append(f"- **Error match:** Same as original (consistent)")
+                    else:
+                        lines.append(f"- **Error match:** Different from original")
+                        lines.append(f"  ```")
+                        lines.append(f"  {rerun_error[:300]}")
+                        lines.append(f"  ```")
+
+            lines.append("")
+
+        # Non-rerun real failures (when grouped strategy skipped some)
+        grouped_not_rerun = [
+            fa for fa in reruns_not_attempted
+            if not getattr(fa.failure, '_is_retry_pass', False)
+        ]
+        if grouped_not_rerun:
+            lines.append("### Not Rerun")
+            lines.append("")
+            lines.append("These tests were not rerun (grouped by exception type — a representative was rerun instead):")
+            lines.append("")
+            for fa in grouped_not_rerun:
+                test_file_name = Path(fa.failure.test_file).name if fa.failure.test_file else fa.failure.test_name
+                exc_type = extract_exception_type(fa.failure.error_message)
+                lines.append(f"- `{test_file_name}` ({exc_type})")
+            lines.append("")
+
+    lines.append("---")
+    lines.append("")
+
     # Detailed Test Failures
     if num_failures > 0:
         lines.append("## 🔍 Detailed Test Failure Analysis")
@@ -3520,7 +3922,12 @@ async def main():
         for i, fa in enumerate(analysis_with_reruns['failure_analyses'], 1):
             # Use the test file name as the heading (e.g., testConnectionCreation.cy.ts)
             test_file_name = Path(fa.failure.test_file).name if fa.failure.test_file else fa.failure.test_name
-            lines.append(f"### {i}. {test_file_name}")
+            is_rp = getattr(fa.failure, '_is_retry_pass', False)
+            status_tag = " ⚠️ *(passed on retry)*" if is_rp else ""
+            rerun = getattr(fa, 'rerun_result', None)
+            if rerun and isinstance(rerun, dict) and rerun.get('attempted') and rerun.get('success'):
+                status_tag += " 🟢 **Pass on re-run**"
+            lines.append(f"### {i}. {test_file_name}{status_tag}")
             lines.append("")
             lines.append(f"**📁 File:** `{fa.failure.test_file}`")
             lines.append("")
@@ -3593,7 +4000,7 @@ async def main():
                 # Use the new classification logic
                 classification = classify_failure_result(rerun, git_info)
                 
-                ran_on = "main branch" if rerun.get('ran_on_main', True) else f"commit {rerun.get('ran_at_commit', 'unknown')[:8]}"
+                ran_on = "main branch" if rerun.get('ran_on_main', True) else f"build commit {rerun.get('ran_at_commit', 'unknown')[:8]}"
                 lines.append(f"**🔄 Test Rerun Analysis ({ran_on}):**")
                 
                 if rerun.get('success'):
@@ -3682,7 +4089,8 @@ async def main():
         stage_timeout_minutes=stage_timeout_minutes, results_by_stage=results_by_stage,
         test_stages_ran=test_stages_ran, analysis_with_reruns=analysis_with_reruns,
         cluster_analysis=cluster_analysis, recent_merges=recent_merges, git_analysis=git_analysis,
-        all_tests_by_stage=all_tests_by_stage,
+        all_tests_by_stage=all_tests_by_stage, version_mismatch=version_mismatch,
+        cluster_image_ages=cluster_image_ages,
     )
     html_report_path = f"reports/current/{name}/latest-build-{build_num}.html"
     with open(html_report_path, 'w') as f:
@@ -3703,6 +4111,8 @@ async def main():
     print(f"❌ Tests failed: {num_failures}")
     if pipeline_failure['is_deployment_failure']:
         print(f"🚨 Pipeline failure: {pipeline_failure['failed_step']}")
+    if version_mismatch.get('has_mismatch'):
+        print(f"🚨 Version mismatch: {version_mismatch['message']}")
     print()
 
     # Publish results to Jira lock ticket
@@ -3728,9 +4138,12 @@ async def main():
                 failure_names=failure_names,
                 md_report_path=current_report_path,
                 html_report_path=html_report_path,
+                version_mismatch=version_mismatch,
             )
         except Exception as e:
+            import traceback
             print(f"   ⚠️  Jira publish failed: {e}")
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
