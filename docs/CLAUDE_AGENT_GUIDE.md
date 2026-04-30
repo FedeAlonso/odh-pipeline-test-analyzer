@@ -1,0 +1,356 @@
+# Claude Agent Quick Reference Guide
+
+This guide is specifically for Claude AI agents to quickly understand and use the Dashboard Build Analyzer.
+
+## 🎯 Primary Goal
+
+Analyze RHOAI/ODH nightly Cypress E2E test builds from Jenkins, automatically rerun failing tests to check for flakiness, and generate comprehensive reports.
+
+## 📋 Job Structure
+
+All E2E tests run in a single job:
+
+- **`components/dashboard/dashboard-e2e-tests`** - Handles setup and runs Cypress E2E tests
+  - Cluster setup and configuration
+  - Operator deployment
+  - Cypress E2E test execution
+  - Contains all test results and artifacts
+
+## 📍 Quick Commands
+
+### Find and Analyze Latest Build (Simplest Method)
+
+```bash
+cd odh-pipeline-test-analyzer
+venv/bin/python scripts/analyze_job.py --job "components/dashboard/dashboard-e2e-tests" --build latest
+```
+
+**This automatically:**
+- ✅ Finds the latest build number
+- ✅ Fetches all test results
+- ✅ **Reruns all failing tests** to check for flakiness
+- ✅ Generates analysis report
+
+### Full Analysis for RHOAI/ODH (Recommended for Nightly Builds)
+
+```bash
+cd odh-pipeline-test-analyzer
+
+# Step 1: Find latest build number
+venv/bin/python scripts/analyze_job.py --job "components/dashboard/dashboard-e2e-tests" --build latest | grep "Build #"
+# Output: "Build #3695: https://..."
+
+# Step 2: Run comprehensive analysis with that build number
+venv/bin/python scripts/comprehensive_analysis.py 3695 rhoai
+# OR for ODH:
+venv/bin/python scripts/comprehensive_analysis.py 3691 odh
+```
+
+## 📂 Report Locations
+
+After running analysis, reports are saved to:
+
+- **RHOAI:** `reports/current/RHOAI/latest-build-{number}.md`
+- **ODH:** `reports/current/ODH/latest-build-{number}.md`
+- **Historical:** `reports/historical/{date}-{variant}-build-{number}-v2.md`
+- **Generic Jobs:** `reports/analysis-{job-name}-{number}.md`
+
+## 🔍 What Each Script Does
+
+### `analyze_job.py` - Generic Job Analyzer
+
+**Use when:** You want to quickly analyze ANY Jenkins job, or automatically find the latest build.
+
+```bash
+# Analyze latest build (finds build number automatically)
+venv/bin/python scripts/analyze_job.py --job "components/dashboard/dashboard-e2e-tests" --build latest
+
+# Analyze specific build
+venv/bin/python scripts/analyze_job.py --job "components/dashboard/dashboard-e2e-tests" --build 3695
+```
+
+**Features:**
+- ✅ Automatic latest build discovery
+- ✅ Test result parsing
+- ✅ **Automatic test reruns** for failing tests
+- ✅ Jira issue searching
+- ✅ Basic report generation
+- ✅ Works with any Jenkins job
+
+**Does NOT include:**
+- ❌ Image deployment tracking
+- ❌ Dashboard commit sync detection
+- ❌ GitLab Jenkins repo correlation
+- ❌ Trend analysis
+
+### `comprehensive_analysis.py` - Full RHOAI/ODH Analyzer
+
+**Use when:** You need complete analysis with image tracking and sync detection for RHOAI/ODH builds.
+
+```bash
+# Requires explicit build number and variant
+venv/bin/python scripts/comprehensive_analysis.py 3695 rhoai
+venv/bin/python scripts/comprehensive_analysis.py 3691 odh
+
+# With trend analysis (compares to previous build)
+venv/bin/python scripts/comprehensive_analysis.py 3695 rhoai --enable-trend
+```
+
+**Features:**
+- ✅ Everything from `analyze_job.py` PLUS:
+- ✅ Deployed image tracking (FBC fragment, IIB, Dashboard)
+- ✅ Dashboard commit synchronization detection
+- ✅ GitLab Jenkins repo commit correlation
+- ✅ Pipeline failure step identification ("Post Actions", "Install ODH Operator", etc.)
+- ✅ Test/code sync issue detection
+- ✅ Trend analysis (with `--enable-trend`)
+- ✅ More detailed Jira correlation
+
+**Requirements:**
+- Must specify build number (cannot use "latest")
+- Must specify variant (rhoai or odh)
+
+## 🤖 Typical Claude Agent Workflow
+
+### Scenario 1: "Analyze last night's build"
+
+```bash
+cd odh-pipeline-test-analyzer
+
+# Quick method - one command does everything
+venv/bin/python scripts/analyze_job.py --job "components/dashboard/dashboard-e2e-tests" --build latest
+
+# Read the report (path shown in output)
+cat reports/analysis-cypress-dashboard-tests-3695.md
+```
+
+### Scenario 2: "Full RHOAI analysis with all features"
+
+```bash
+cd odh-pipeline-test-analyzer
+
+# Step 1: Find latest build
+BUILD_NUM=$(venv/bin/python scripts/analyze_job.py --job "components/dashboard/dashboard-e2e-tests" --build latest 2>&1 | grep "Build #" | grep -oP '\d+' | head -1)
+
+# Step 2: Run comprehensive analysis
+venv/bin/python scripts/comprehensive_analysis.py $BUILD_NUM rhoai
+
+# Step 3: Read the comprehensive report
+cat reports/current/RHOAI/latest-build-${BUILD_NUM}.md
+```
+
+### Scenario 3: "Compare today's build to yesterday's"
+
+```bash
+cd odh-pipeline-test-analyzer
+
+# Use --enable-trend flag for automated nightly analysis
+venv/bin/python scripts/comprehensive_analysis.py 3695 rhoai --enable-trend
+
+# This adds trend analysis comparing with previous build
+```
+
+## 📋 Report Contents
+
+Each report includes:
+
+1. **Quick Status Overview** - Pass/fail summary, test counts
+2. **Deployment & Image Information** - Deployed images, commit tracking
+3. **Pipeline Failure Details** - Which step failed in the pipeline
+4. **Test Failures** - Detailed failure analysis with:
+   - Test name (e.g., `testRegisterModel`, not long describe/it chains)
+   - Error message and stack trace
+   - Rerun results (passed on rerun = flaky, failed on rerun = consistent)
+   - Related Jira issues
+   - Category (timeout, auth, resource, etc.)
+7. **Recent Commits** - Separated into:
+   - GitLab Jenkins changes (can break pipeline)
+   - GitHub Dashboard changes (can break E2E tests only)
+8. **Cluster Health** - Pod status, events, warnings
+
+## 🔑 Key Features
+
+### Automatic Test Reruns
+
+**All failing tests are automatically rerun** to determine if they're flaky or consistently failing.
+
+- ✅ Passed on rerun = **Intermittent/Flaky** test
+- ❌ Failed on rerun = **Consistently failing** test
+
+This happens automatically - no flags needed.
+
+### Test Name Display
+
+Test names are shown as clean filenames, not long describe/it chains:
+
+- ✅ `testRegisterModel`
+- ✅ `testClusterStorageCreation`
+- ❌ NOT: "Verify the filters on Resources page Verify the filters on Resources page Test whether enabled..."
+
+### Pipeline Failure Detection
+
+Correctly identifies which pipeline step failed:
+
+- ✅ "Configure Cluster"
+- ✅ "Deploy RHOAI Operator" / "Deploy ODH Operator"
+- ✅ "Verify Dashboard is Ready"
+- ✅ "Post Actions" (failures after tests complete)
+- ✅ "Run Cypress Tests"
+
+### Commit Categorization
+
+Commits are separated by impact:
+
+- **GitLab Jenkins commits** - Can break the pipeline itself
+- **GitHub Dashboard commits** - Can only break E2E tests, not the pipeline
+
+## ⚠️ Common Issues
+
+### Issue: "ModuleNotFoundError: No module named 'X'"
+
+**Solution:** Always use `venv/bin/python` not just `python`
+
+```bash
+# Wrong
+python scripts/analyze_job.py
+
+# Correct
+venv/bin/python scripts/analyze_job.py
+```
+
+### Issue: "Missing required environment variables"
+
+**Solution:** Ensure `.env` file exists and is configured
+
+```bash
+# Check if .env exists
+ls -la odh-pipeline-test-analyzer/.env
+
+# Verify config
+venv/bin/python -c "from analyzer.config import Config; Config.validate()"
+```
+
+### Issue: "Cannot find build"
+
+**Solution:** The build might not exist or Jenkins might be unreachable
+
+```bash
+# Test Jenkins connection
+curl -u "$JENKINS_USER:$JENKINS_TOKEN" "$JENKINS_URL/api/json"
+```
+
+## 📖 Environment Variables
+
+All credentials are loaded from `odh-pipeline-test-analyzer/.env`:
+
+**Required:**
+- `JENKINS_URL` - Jenkins instance URL
+- `JENKINS_USER` - Jenkins username
+- `JENKINS_TOKEN` - Jenkins API token
+- `FRONTEND_REPO_PATH` - Path to odh-dashboard repo
+- `JENKINS_REPO_PATH` - Path to Jenkins GitLab repo
+- Cluster credentials (RHOAI_*, ODH_*)
+
+**Optional:**
+- `JIRA_TOKEN` - For Jira issue correlation
+- `GITLAB_TOKEN` - For GitLab commit analysis
+- `TRACER_PATH` - For image metadata extraction
+
+## 🎓 Advanced Usage
+
+### Analyzing Non-Nightly Builds
+
+```bash
+# Any build from any Jenkins job
+venv/bin/python scripts/analyze_job.py \
+  --job "your/team/pipeline" \
+  --build 1234
+```
+
+### Scheduled Analysis
+
+```bash
+# Run immediately
+venv/bin/python scripts/nightly_analyzer.py --mode run-now
+
+# Run on schedule (Mon-Fri 9:30 AM GMT)
+venv/bin/python scripts/nightly_analyzer.py --mode schedule
+```
+
+## 🔗 Related Documentation
+
+- **Full README:** `README.md` - Complete documentation
+- **Jira Search Patterns:** `docs/JIRA_SEARCH_PATTERNS.md` - How Jira searches work
+- **Environment Template:** `env.template` - Configuration reference
+
+---
+
+## 🧪 Manual Test Rerun Commands
+
+When you need to manually rerun a specific test:
+
+### Setup (One-time)
+```bash
+# Ensure odh-dashboard repo has dependencies installed
+cd ~/odh-dashboard && npm install
+
+# Test-variables are stored in odh-pipeline-test-analyzer:
+# - RHOAI: odh-pipeline-test-analyzer/test-variables/rhoai-test-variables.yml
+# - ODH: odh-pipeline-test-analyzer/test-variables/odh-test-variables.yml
+```
+
+### Login to Cluster
+```bash
+# Export credentials from your .env file first
+source .env  # Or manually export the variables
+
+# For RHOAI
+oc login -u "$RHOAI_USERNAME" -p "$RHOAI_PASSWORD" \
+  --server="$RHOAI_API_SERVER" \
+  --insecure-skip-tls-verify=true
+
+# For ODH
+oc login -u "$ODH_USERNAME" -p "$ODH_PASSWORD" \
+  --server="$ODH_API_SERVER" \
+  --insecure-skip-tls-verify=true
+```
+
+### Run Tests
+```bash
+cd ~/odh-dashboard/packages/cypress
+
+# Run specific test file
+export CY_TEST_CONFIG='odh-pipeline-test-analyzer/test-variables/rhoai-test-variables.yml'
+npx cypress run --spec 'cypress/tests/e2e/dashboardNavigation/testUserLogin.cy.ts' --browser electron
+
+# Run test by name (grep filter)
+npx cypress run --env '{"grep":"Admin Users can login","grepFilterSpecs":true}' --browser electron
+
+# Run all tests in a directory
+npx cypress run --spec 'cypress/tests/e2e/modelRegistry/*.cy.ts' --browser electron
+```
+
+### Test File Locations
+Tests are located at: `~/odh-dashboard/packages/cypress/cypress/tests/e2e/`
+
+Common test directories:
+- `dashboardNavigation/` - Login, navigation tests
+- `modelServing/` - Model serving tests
+- `modelRegistry/` - Model registry tests
+- `pipelines/` - Data science pipelines tests
+- `projects/` - Project management tests
+
+## 🤖 Ambient Code Platform Integration
+
+For running this analyzer as an autonomous Claude Agent, see:
+- **[AMBIENT_CODE_INTEGRATION.md](./AMBIENT_CODE_INTEGRATION.md)** - Full integration guide
+
+---
+
+**Last Updated:** 2025-12-15
+
+**Questions?** All functionality is self-contained - just run the commands and read the generated reports!
+
+
+
+
