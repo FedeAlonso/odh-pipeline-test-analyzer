@@ -325,6 +325,7 @@ def compose_slack_message(
     classified: Dict[str, Any],
     flaky_tests: Optional[List[str]] = None,
     jira_statuses: Optional[Dict[str, Dict[str, Any]]] = None,
+    rerun_results: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """
     Compose a Slack mrkdwn-formatted message for the Jenkins Bot thread.
@@ -336,9 +337,11 @@ def compose_slack_message(
         classified: Output from classify_failures().
         flaky_tests: List of test names that passed on retry.
         jira_statuses: {jira_key: {"status": str, "summary": str, "latest_comment": str}}
+        rerun_results: List of {"test_name": str, "passed": bool} from test reruns.
     """
     flaky_tests = flaky_tests or []
     jira_statuses = jira_statuses or {}
+    rerun_results = rerun_results or []
     lines = [DISCLAIMER, ""]
 
     ticket_key = analysis.get("jira_ticket_key")
@@ -370,6 +373,21 @@ def compose_slack_message(
         step = pipeline.get("failed_step", "unknown")
         error = pipeline.get("exception_type", "unknown error")
         lines.append(f"• *Pipeline failure:* `{step}` — `{error}` (post-build, did not affect test execution)")
+
+    vm = analysis.get("version_mismatch")
+    if vm and vm.get("has_mismatch"):
+        lines.append(f":rotating_light: *Version Mismatch:* Expected `{vm['expected_version']}` (FBC) but operator installed is `{vm['installed_version']}`")
+
+    image_ages = analysis.get("cluster_image_ages")
+    if image_ages:
+        old = [i for i in image_ages if i.get('age_days') is not None and i['age_days'] > 7]
+        fresh = [i for i in image_ages if i.get('age_days') is not None and i['age_days'] <= 7]
+        if old:
+            lines.append(f":package: *Image Ages* ({len(fresh)} fresh, {len(old)} stale)")
+            for img in sorted(old, key=lambda x: -(x.get('age_days') or 0)):
+                lines.append(f"   • `{img['component']}` — {img['age_str']} :warning:")
+        else:
+            lines.append(f":package: *Image Ages:* all {len(fresh)} images fresh (<7d)")
     lines.append("")
 
     repeated = classified.get("repeated", [])
@@ -440,6 +458,18 @@ def compose_slack_message(
         lines.append(names)
         lines.append("")
 
+    if rerun_results:
+        passed_rerun = [r for r in rerun_results if r.get("passed")]
+        failed_rerun = [r for r in rerun_results if not r.get("passed")]
+        lines.append(":arrows_counterclockwise: *Test Rerun Results*")
+        if passed_rerun:
+            names = ", ".join(f"`{r['test_name']}`" for r in passed_rerun)
+            lines.append(f":large_green_circle: *PASSED ON RERUN:* {names}")
+        if failed_rerun:
+            names = ", ".join(f"`{r['test_name']}`" for r in failed_rerun)
+            lines.append(f":red_circle: *DIDN'T PASS ON RERUN:* {names}")
+        lines.append("")
+
     message = "\n".join(lines)
     if len(message) > SLACK_CHAR_LIMIT:
         message = message[:SLACK_CHAR_LIMIT - 20] + "\n... (truncated)"
@@ -465,6 +495,7 @@ def prepare_slack_message(
     flaky_tests: List[str],
     analysis: Dict[str, Any],
     jira_statuses: Optional[Dict[str, Dict[str, Any]]] = None,
+    rerun_results: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     End-to-end: takes raw MCP data and returns a ready-to-post Slack message.
@@ -480,6 +511,7 @@ def prepare_slack_message(
                   jira_ticket_key, jira_ticket_url, cluster_health, pipeline_failure.
         jira_statuses: {jira_key: {"status": str, "summary": str, "latest_comment": str}}
                        from jira_lock.fetch_jira_statuses().
+        rerun_results: List of {"test_name": str, "passed": bool} from test reruns.
 
     Returns:
         {"thread_ts": str or None, "message": str} — ready to pass to mcp__slack__post_message.
@@ -508,6 +540,6 @@ def prepare_slack_message(
 
     analysis["build_number"] = build_number
     analysis["platform"] = platform
-    message = compose_slack_message(analysis, classified, flaky_tests, jira_statuses)
+    message = compose_slack_message(analysis, classified, flaky_tests, jira_statuses, rerun_results)
 
     return {"thread_ts": thread_ts, "message": message}

@@ -19,8 +19,9 @@ build/
 .env.bak
 *.env.bak
 
-# Claude settings (contains personal permissions and may contain credentials)
-.claude/
+# Claude settings (personal local settings and memory - not shared)
+.claude/settings.local.json
+.claude/memory/
 
 # Test variables (contain cluster credentials and sensitive config)
 test-variables/
