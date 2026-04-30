@@ -6,6 +6,7 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 from .artifact_parser import TestFailure, TestResult, ArtifactParser
 from .cluster_inspector import ClusterInspector
+from .config import Config
 from .jira_search_patterns import JiraSearchMatcher
 
 
@@ -26,8 +27,12 @@ class FailureAnalysis:
 class FailureAnalyzer:
     """Analyze test failures and provide insights"""
 
-    def __init__(self, jira_client=None, enable_test_rerun=True, frontend_repo_path=None):
+    DOWNSTREAM_REMOTE = 'downstream'
+    DOWNSTREAM_URL = 'https://github.com/red-hat-data-services/odh-dashboard.git'
+
+    def __init__(self, jira_client=None, enable_test_rerun=True, frontend_repo_path=None, build_commit=None):
         self.parser = ArtifactParser()
+        self.build_commit = build_commit
         self.jira_client = jira_client
         self.jira_matcher = JiraSearchMatcher()
         self.enable_test_rerun = enable_test_rerun
@@ -90,7 +95,7 @@ class FailureAnalyzer:
         # Actually rerun the test if enabled (handles authentication securely)
         rerun_result = None
         if self.enable_test_rerun:
-            rerun_result = await self.rerun_failed_test(failure, cluster_name)
+            rerun_result = await self.rerun_failed_test(failure, cluster_name, at_commit=self.build_commit)
 
         # Generate intelligent Jira search queries based on test failure
         jira_queries = self.jira_matcher.generate_jira_queries(
@@ -387,34 +392,117 @@ class FailureAnalyzer:
 
         return cmd
 
+    @staticmethod
+    def _extract_cypress_error(output: str) -> str:
+        """Extract the actual Cypress error from combined stdout+stderr.
+
+        Cypress writes test failure details to stdout, not stderr.
+        stderr only contains Chrome DevTools debug messages.
+        """
+        import re
+
+        # Look for AssertionError / CypressError / Error lines
+        error_patterns = [
+            r'(AssertionError:.*?)(?:\n\n|\n\s*at\s)',
+            r'(CypressError:.*?)(?:\n\n|\n\s*at\s)',
+            r'(Error:.*?)(?:\n\n|\n\s*at\s)',
+            r'(Timed out retrying after \d+ms:.*?)(?:\n\n|\n\s*at\s)',
+        ]
+        for pattern in error_patterns:
+            match = re.search(pattern, output, re.DOTALL)
+            if match:
+                return match.group(1).strip()
+
+        # Fallback: look for the "Failing:" section in Cypress output
+        failing_match = re.search(r'Failing:\s*\n(.*?)(?:\n\s*\n|\Z)', output, re.DOTALL)
+        if failing_match:
+            return failing_match.group(1).strip()
+
+        # Last resort: grab lines containing "error" or "failed" (case-insensitive)
+        error_lines = [
+            line.strip() for line in output.split('\n')
+            if re.search(r'error|failed|timed out|not found', line, re.IGNORECASE)
+            and 'DevTools' not in line
+            and line.strip()
+        ]
+        if error_lines:
+            return '\n'.join(error_lines[:10])
+
+        return output[:500] if output else ''
+
+    def _ensure_downstream_remote(self) -> bool:
+        """Add the downstream remote if not already configured."""
+        import subprocess
+        remotes = subprocess.run(
+            ['git', 'remote'],
+            cwd=self.frontend_repo_path, capture_output=True, text=True, timeout=10
+        )
+        if self.DOWNSTREAM_REMOTE in remotes.stdout.split():
+            return True
+        print(f"  [RERUN] Adding '{self.DOWNSTREAM_REMOTE}' remote: {self.DOWNSTREAM_URL}")
+        add = subprocess.run(
+            ['git', 'remote', 'add', self.DOWNSTREAM_REMOTE, self.DOWNSTREAM_URL],
+            cwd=self.frontend_repo_path, capture_output=True, text=True, timeout=10
+        )
+        return add.returncode == 0
+
+    def _fetch_commit(self, commit: str) -> bool:
+        """Fetch a commit, trying upstream first then downstream remote."""
+        import subprocess
+        # Check if commit already exists locally
+        check = subprocess.run(
+            ['git', 'cat-file', '-t', commit],
+            cwd=self.frontend_repo_path, capture_output=True, text=True, timeout=10
+        )
+        if check.returncode == 0:
+            return True
+
+        # Try fetching from upstream first
+        print(f"  [RERUN] Commit {commit[:8]} not found locally, fetching from upstream...")
+        fetch_up = subprocess.run(
+            ['git', 'fetch', 'upstream', '--quiet'],
+            cwd=self.frontend_repo_path, capture_output=True, text=True, timeout=60
+        )
+        check = subprocess.run(
+            ['git', 'cat-file', '-t', commit],
+            cwd=self.frontend_repo_path, capture_output=True, text=True, timeout=10
+        )
+        if check.returncode == 0:
+            return True
+
+        # Fetch from downstream remote
+        self._ensure_downstream_remote()
+        print(f"  [RERUN] Fetching from downstream remote...")
+        fetch_down = subprocess.run(
+            ['git', 'fetch', self.DOWNSTREAM_REMOTE, '--quiet'],
+            cwd=self.frontend_repo_path, capture_output=True, text=True, timeout=60
+        )
+        check = subprocess.run(
+            ['git', 'cat-file', '-t', commit],
+            cwd=self.frontend_repo_path, capture_output=True, text=True, timeout=10
+        )
+        return check.returncode == 0
+
     async def rerun_failed_test(
         self,
         failure: TestFailure,
         cluster: str,
         test_variables_path: str = None,
-        timeout: int = 300000,  # 5 minutes default
-        at_commit: str = None  # NEW: optionally run at specific commit
+        timeout: int = 600000,  # 10 minutes default
+        at_commit: str = None
     ) -> Dict[str, Any]:
         """
         Execute test rerun with secure authentication handling.
-        
-        SECURITY: Password is passed via stdin to oc login, never exposed in
-        command line arguments or logs.
 
-        Args:
-            failure: The failed test
-            cluster: "rhoai" or "odh"
-            test_variables_path: Path to test-variables.yml
-            timeout: Timeout in milliseconds
-            at_commit: Optional git commit to checkout before running (for accurate comparison)
-
-        Returns:
-            Dict with rerun results including success/failure and output
+        When at_commit is provided, checks out that exact commit in the
+        frontend repo before running the test. The commit may come from
+        the downstream repo (red-hat-data-services/odh-dashboard), so
+        we add it as a remote and fetch if needed.
         """
         import subprocess
         import time
 
-        commit_info = f" at commit {at_commit[:8]}" if at_commit else " (main branch)"
+        commit_info = f" (build commit {at_commit[:8]})" if at_commit else " (main branch)"
         print(f"\n  [RERUN] Attempting to rerun test: {failure.test_name[:60]}...{commit_info}")
 
         result = {
@@ -425,8 +513,8 @@ class FailureAnalyzer:
             'error_output': '',
             'duration': 0,
             'timestamp': time.time(),
-            'ran_at_commit': at_commit,  # NEW: track which commit we ran at
-            'ran_on_main': at_commit is None  # NEW: flag if ran on main
+            'ran_at_commit': at_commit,
+            'ran_on_main': at_commit is None
         }
 
         # Get cluster credentials securely from environment
@@ -443,37 +531,32 @@ class FailureAnalyzer:
         try:
             start_time = time.time()
 
-            # NEW: If at_commit specified, checkout that commit first
             if at_commit:
-                print(f"  [RERUN] Checking out commit {at_commit[:8]}...")
                 # Save current branch/commit to restore later
                 branch_result = subprocess.run(
                     ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
-                    cwd=self.frontend_repo_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=10
+                    cwd=self.frontend_repo_path, capture_output=True, text=True, timeout=10
                 )
                 if branch_result.returncode == 0:
                     original_branch = branch_result.stdout.strip()
                     if original_branch == 'HEAD':
-                        # Detached HEAD, save the commit instead
                         commit_result = subprocess.run(
                             ['git', 'rev-parse', 'HEAD'],
-                            cwd=self.frontend_repo_path,
-                            capture_output=True,
-                            text=True,
-                            timeout=10
+                            cwd=self.frontend_repo_path, capture_output=True, text=True, timeout=10
                         )
                         original_branch = commit_result.stdout.strip()
-                
-                # Checkout the target commit
+
+                # Fetch and checkout the build commit
+                if not self._fetch_commit(at_commit):
+                    result['output'] = f"Failed to fetch commit {at_commit} from any remote"
+                    result['exit_code'] = 1
+                    print(f"  [RERUN] ✗ Could not find commit {at_commit[:8]} in any remote")
+                    return result
+
+                print(f"  [RERUN] Checking out build commit {at_commit[:8]}...")
                 checkout_result = subprocess.run(
                     ['git', 'checkout', at_commit],
-                    cwd=self.frontend_repo_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=30
+                    cwd=self.frontend_repo_path, capture_output=True, text=True, timeout=30
                 )
                 if checkout_result.returncode != 0:
                     result['output'] = f"Failed to checkout commit {at_commit}: {checkout_result.stderr}"
@@ -507,12 +590,21 @@ class FailureAnalyzer:
             # Step 2: Run the Cypress test
             cypress_dir = f"{self.frontend_repo_path}/packages/cypress"
             
-            # Determine test variables path
+            # Determine test variables path:
+            # 1. Explicit argument, 2. Env var per cluster, 3. Frontend repo default
             if test_variables_path:
                 test_vars_full_path = test_variables_path
             else:
-                analyzer_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                test_vars_full_path = os.path.join(analyzer_dir, 'test-variables', f'{cluster.lower()}-test-variables.yml')
+                env_path = (Config.RHOAI_TEST_VARIABLES if cluster.lower() == 'rhoai'
+                            else Config.ODH_TEST_VARIABLES)
+                test_vars_full_path = env_path or os.path.join(cypress_dir, 'test-variables.yml')
+
+            if not os.path.isfile(test_vars_full_path):
+                result['output'] = f"Test variables file not found: {test_vars_full_path}"
+                result['exit_code'] = 1
+                print(f"  [RERUN] ✗ Test variables not found: {test_vars_full_path}")
+                print(f"  [RERUN]   Set RHOAI_TEST_VARIABLES or ODH_TEST_VARIABLES in .env")
+                return result
 
             # Build cypress command (no shell=True for security)
             cypress_env = os.environ.copy()
@@ -542,7 +634,7 @@ class FailureAnalyzer:
             if password and password in output:
                 output = output.replace(password, "[REDACTED]")
             result['output'] = output
-            result['error_output'] = process.stderr if process.returncode != 0 else ''
+            result['error_output'] = self._extract_cypress_error(output) if process.returncode != 0 else ''
             result['duration'] = duration
             result['success'] = (process.returncode == 0)
 
@@ -554,6 +646,7 @@ class FailureAnalyzer:
         except subprocess.TimeoutExpired:
             result['output'] = f"Test timed out after {timeout/1000}s"
             result['exit_code'] = -1
+            result['duration'] = timeout / 1000
             print(f"  [RERUN] ✗ Test timed out after {timeout/1000}s")
 
         except Exception as e:

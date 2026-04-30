@@ -111,11 +111,41 @@ async def cmd_slack(args):
     real_failures = [t.strip() for t in args.real_failures.split(",")] if args.real_failures else []
     flaky = [t.strip() for t in args.flaky.split(",")] if args.flaky else []
 
+    rerun_results = []
+    if args.rerun_passed:
+        for t in args.rerun_passed.split(","):
+            if t.strip():
+                rerun_results.append({"test_name": t.strip(), "passed": True})
+    if args.rerun_failed:
+        for t in args.rerun_failed.split(","):
+            if t.strip():
+                rerun_results.append({"test_name": t.strip(), "passed": False})
+
     jira_keys = collect_jira_keys(thread_data)
     jira_statuses = await fetch_jira_statuses(jira_keys)
 
     cluster = parse_cluster_pods(args.cluster_pods) if args.cluster_pods else {}
     pipeline = parse_pipeline_failure(args.pipeline_failure) if args.pipeline_failure else {}
+
+    vm = {}
+    if args.version_mismatch:
+        parts = args.version_mismatch.split(":")
+        if len(parts) == 2:
+            vm = {"has_mismatch": True, "expected_version": parts[0], "installed_version": parts[1],
+                  "message": f"FBC fragment targets {parts[0]} but operator installed is {parts[1]}"}
+
+    image_ages = []
+    if args.image_ages:
+        for entry in args.image_ages.split(","):
+            parts = entry.strip().split(":")
+            if len(parts) >= 2:
+                name, age = parts[0], parts[1]
+                try:
+                    days = int(age.rstrip('d'))
+                    image_ages.append({"component": name, "age_days": days,
+                                       "age_str": f"{days}d", "build_date": "", "commit": ""})
+                except ValueError:
+                    pass
 
     analysis = {
         "total_tests": args.total,
@@ -125,6 +155,8 @@ async def cmd_slack(args):
         "jira_ticket_url": args.ticket_url or "",
         "cluster_health": cluster,
         "pipeline_failure": pipeline,
+        "version_mismatch": vm,
+        "cluster_image_ages": image_ages,
     }
 
     result = prepare_slack_message(
@@ -136,6 +168,7 @@ async def cmd_slack(args):
         flaky_tests=flaky,
         analysis=analysis,
         jira_statuses=jira_statuses,
+        rerun_results=rerun_results,
     )
 
     output = json.dumps(result, indent=2)
@@ -179,6 +212,10 @@ def main():
     slack_p.add_argument("--ticket-url", default="")
     slack_p.add_argument("--cluster-pods", default="")
     slack_p.add_argument("--pipeline-failure", default="")
+    slack_p.add_argument("--rerun-passed", default="", help="Comma-separated test names that passed on rerun")
+    slack_p.add_argument("--rerun-failed", default="", help="Comma-separated test names that failed on rerun")
+    slack_p.add_argument("--version-mismatch", default="", help="expected:installed (e.g. '3.5:3.4-ea1')")
+    slack_p.add_argument("--image-ages", default="", help="Comma-separated component:age_days (e.g. 'dspo:19,feast:14')")
     slack_p.add_argument("--output", default="", help="Output file (default: stdout)")
 
     args = parser.parse_args()
