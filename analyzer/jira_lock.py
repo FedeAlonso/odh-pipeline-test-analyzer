@@ -101,6 +101,35 @@ async def create_lock_ticket(
         }
 
 
+async def _close_ticket(issue_key: str) -> bool:
+    base_url = Config.JIRA_URL.rstrip('/')
+    async with httpx.AsyncClient(verify=Config.SSL_VERIFY, timeout=30.0) as client:
+        resp = await client.get(
+            f"{base_url}/rest/api/3/issue/{issue_key}/transitions",
+            headers=_headers(),
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        transitions = resp.json().get("transitions", [])
+
+        close_id = None
+        for t in transitions:
+            if t["name"].lower() in ("done", "closed", "resolved"):
+                close_id = t["id"]
+                break
+        if not close_id:
+            return False
+
+        resp = await client.post(
+            f"{base_url}/rest/api/3/issue/{issue_key}/transitions",
+            headers=_headers(),
+            auth=_auth(),
+            json={"transition": {"id": close_id}},
+        )
+        resp.raise_for_status()
+        return True
+
+
 async def check_or_create_lock(
     build_num: int,
     platform: str,
@@ -128,6 +157,10 @@ async def check_or_create_lock(
 
     created = await create_lock_ticket(build_num, platform, build_date_str, project)
     if created:
+        try:
+            await _close_ticket(created["key"])
+        except Exception:
+            pass
         print(f"✅ Created analysis lock ticket: {created['key']} ({created['url']})")
         return (True, created["key"])
 
@@ -279,10 +312,25 @@ async def fetch_jira_statuses(keys: list) -> Dict[str, Dict[str, Any]]:
                         content = body.get("content", [])
                         if content and content[0].get("content"):
                             latest = content[0]["content"][0].get("text", "")[:200]
+                    pr_links = []
+                    try:
+                        rl_resp = await client.get(
+                            f"{base_url}/rest/api/3/issue/{key}/remotelink",
+                            headers=_headers(),
+                            auth=_auth(),
+                        )
+                        if rl_resp.status_code == 200:
+                            for link in rl_resp.json():
+                                url = link.get("object", {}).get("url", "")
+                                if "github.com/" in url and "/pull/" in url:
+                                    pr_links.append(url)
+                    except Exception:
+                        pass
                     result[key] = {
                         "status": status,
                         "summary": summary,
                         "latest_comment": latest,
+                        "pr_links": pr_links,
                     }
                 except Exception:
                     continue

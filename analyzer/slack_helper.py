@@ -7,6 +7,7 @@ the agent uses Slack MCP tools for communication.
 """
 import json
 import re
+import subprocess
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Any, Optional
@@ -143,8 +144,9 @@ def extract_failure_durations(thread_messages: List[str]) -> Dict[str, Dict[str,
     """
     durations = {}
     # Match patterns like "testName broken 5 days" or "testName.cy.ts broken 4 days"
+    # Require test-like prefix to avoid matching random words before "broken"
     broken_pattern = re.compile(
-        r'[`]?(\w+(?:\.cy\.ts)?)[`]?\s+.*?broken\s+(\d+)\s+days?',
+        r'[`]?(test\w+(?:\.cy\.ts)?)[`]?\s+.*?broken\s+(\d+)\s+days?',
         re.IGNORECASE,
     )
     ts_pattern = re.compile(r'\[(\d+\.\d+)\]')
@@ -194,6 +196,10 @@ def extract_investigation_context(
         author = match.group(1).strip()
         text = match.group(2).strip()
         if _is_bulk_failure_list(text):
+            continue
+        if re.search(r'Full analysis report attached to\s+RHOAIENG-', text, re.IGNORECASE):
+            continue
+        if re.match(r'^\*?NOTE:\s*_This is an Agentic-AI generated', text):
             continue
         if any(p.search(text) for p in relevant_patterns):
             jira_refs = jira_pattern.findall(text)
@@ -246,78 +252,181 @@ def classify_failures(
     repeated = []
     new = []
 
+    def _matches_failure(norm, root, failures):
+        if norm in failures:
+            return True
+        if len(root) >= 4:
+            return any(root in _test_root(f) or _test_root(f) in root for f in failures)
+        return False
+
     for norm_name, orig_name in normalized_current.items():
-        builds_with_failure = [
-            h for h in history_by_build if norm_name in h["failures"]
+        current_root = _test_root(norm_name)
+
+        # Classify as "repeated" if the test failed in 2+ of the historical
+        # builds, even if there are gaps (e.g. fixed in one build then broke again).
+        matching_builds = [
+            h for h in history_by_build
+            if _matches_failure(norm_name, current_root, h["failures"])
         ]
 
-        # Fuzzy fallback: match by area root keyword when exact name not found
-        # e.g. testSchedulePipeline matches historical "pipelines" via root "pipeline"
-        if not builds_with_failure:
-            current_root = _test_root(norm_name)
-            if len(current_root) >= 4:
-                builds_with_failure = [
-                    h for h in history_by_build
-                    if any(current_root in _test_root(f) or _test_root(f) in current_root
-                           for f in h["failures"])
-                ]
-
-        if builds_with_failure:
-            # Calculate days broken using the oldest "broken N days" annotation.
-            # Find the oldest historical build mentioning this test and its
-            # "broken N days" note. The failure started N days before that
-            # thread's date, so total days = (now - thread_date) + N.
-            days_broken = None
-            current_root = _test_root(norm_name)
-            for h in reversed(builds_with_failure):
-                durations = h.get("failure_durations", {})
-                d = durations.get(norm_name)
-                if not d and len(current_root) >= 4:
-                    for dk, dv in durations.items():
-                        dk_root = _test_root(dk)
-                        if current_root in dk_root or dk_root in current_root:
-                            d = dv
-                            break
-                if d:
-                    thread_date = _ts_to_datetime(str(d["message_ts"]))
-                    elapsed = (now - thread_date).days
-                    days_broken = d["broken_days"] + elapsed
-                    break
-
-            # Fallback: if no "broken N days" annotation found, estimate from
-            # the oldest build's thread timestamp
-            if days_broken is None and builds_with_failure:
-                oldest = builds_with_failure[-1]
-                if oldest.get("thread_ts"):
-                    thread_date = _ts_to_datetime(oldest["thread_ts"])
-                    days_broken = (now - thread_date).days
-
-            notes = []
-            search_terms = {norm_name.lower()}
-            search_terms.update(_test_keywords(norm_name))
-            for h in builds_with_failure:
-                for note in h.get("investigation_notes", []):
-                    text_lower = note.get("text", "").lower()
-                    if any(t in text_lower for t in search_terms):
-                        notes.append(note)
-
-            repeated.append({
-                "test_name": orig_name,
-                "days_broken": days_broken,
-                "seen_in_builds": [h["build_number"] for h in builds_with_failure],
-                "jira_issues": jira_issues.get(orig_name, []),
-                "investigation_notes": notes,
-            })
-        else:
+        if len(matching_builds) < 2:
             new.append({
                 "test_name": orig_name,
                 "jira_issues": jira_issues.get(orig_name, []),
             })
+            continue
+
+        consecutive_builds = matching_builds
+
+        # Calculate days broken from the oldest build in the consecutive streak
+        days_broken = None
+        for h in reversed(consecutive_builds):
+            durations = h.get("failure_durations", {})
+            d = durations.get(norm_name)
+            if not d and len(current_root) >= 4:
+                for dk, dv in durations.items():
+                    dk_root = _test_root(dk)
+                    if current_root in dk_root or dk_root in current_root:
+                        d = dv
+                        break
+            if d:
+                thread_date = _ts_to_datetime(str(d["message_ts"]))
+                elapsed = (now - thread_date).days
+                days_broken = d["broken_days"] + elapsed
+                break
+
+        if days_broken is None:
+            oldest = consecutive_builds[-1]
+            if oldest.get("thread_ts"):
+                thread_date = _ts_to_datetime(oldest["thread_ts"])
+                days_broken = (now - thread_date).days
+
+        if days_broken is not None and days_broken < 1:
+            days_broken = 1
+
+        notes = []
+        search_terms = {norm_name.lower()}
+        search_terms.update(_test_keywords(norm_name))
+
+        for h in consecutive_builds:
+            for note in h.get("investigation_notes", []):
+                text_lower = note.get("text", "").lower()
+                if norm_name.lower() in text_lower:
+                    notes.append({**note, "_match_type": "exact"})
+
+        if not notes:
+            for h in consecutive_builds:
+                for note in h.get("investigation_notes", []):
+                    text_lower = note.get("text", "").lower()
+                    if any(t in text_lower for t in search_terms):
+                        notes.append({**note, "_match_type": "keyword"})
+
+        repeated.append({
+            "test_name": orig_name,
+            "days_broken": days_broken,
+            "seen_in_builds": [h["build_number"] for h in consecutive_builds],
+            "jira_issues": jira_issues.get(orig_name, []),
+            "investigation_notes": notes,
+        })
 
     repeated.sort(key=lambda r: r.get("days_broken") or 0, reverse=True)
     new.sort(key=lambda n: n["test_name"])
 
     return {"repeated": repeated, "new": new}
+
+
+_pr_title_cache: Dict[str, Optional[str]] = {}
+
+
+def _fetch_pr_title(pr_url: str) -> Optional[str]:
+    """Fetch PR title from GitHub API via gh CLI. Returns None on failure."""
+    if pr_url in _pr_title_cache:
+        return _pr_title_cache[pr_url]
+    match = re.match(r'https?://github\.com/([^/]+/[^/]+)/pull/(\d+)', pr_url)
+    if not match:
+        _pr_title_cache[pr_url] = None
+        return None
+    repo, number = match.group(1), match.group(2)
+    try:
+        result = subprocess.run(
+            ['gh', 'api', f'repos/{repo}/pulls/{number}', '--jq', '.title'],
+            capture_output=True, text=True, timeout=10,
+        )
+        title = result.stdout.strip() if result.returncode == 0 else None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        title = None
+    _pr_title_cache[pr_url] = title
+    return title
+
+
+def _is_pr_related_to_test(pr_url: str, test_name: str) -> bool:
+    """Check if a PR is related to a test by matching the PR title against test keywords."""
+    title = _fetch_pr_title(pr_url)
+    if title is None:
+        return True
+    title_lower = title.lower()
+    if test_name.lower() in title_lower:
+        return True
+    keywords = _test_keywords(test_name)
+    return any(k in title_lower for k in keywords)
+
+
+def _synthesize_notes(
+    test_name: str,
+    notes: List[Dict[str, Any]],
+    jira_statuses: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    all_jira_refs: List[str] = []
+    all_pr_refs: List[str] = []
+    context_parts: List[str] = []
+
+    for note in notes:
+        text = note.get("text", "")
+        text = re.sub(
+            r'^(?:Test[:\s]+)?[`]?' + re.escape(test_name) + r'[`]?\s*[:\-—.]?\s*',
+            '', text, flags=re.IGNORECASE,
+        ).strip()
+        if re.match(r'^same\s+(?:issues?|errors?|failures?)\s+as\s+(?:yesterday|before|last)', text, re.IGNORECASE):
+            continue
+        text = re.sub(r'https?://\S+', '', text).strip()
+        text = re.sub(r'RHOAIENG-\d+\s*(?:created)?\.?\s*', '', text).strip()
+        text = re.sub(r'[\s.]+$', '', text).strip()
+
+        if text and len(text) > 15:
+            context_parts.append((note.get("author", ""), text))
+
+        all_jira_refs.extend(note.get("jira_refs", []))
+        if note.get("_match_type") != "keyword":
+            all_pr_refs.extend(note.get("pr_refs", []))
+
+    seen_jiras: set = set()
+    unique_jiras: List[str] = []
+    for j in all_jira_refs:
+        if j not in seen_jiras:
+            seen_jiras.add(j)
+            unique_jiras.append(j)
+    seen_prs: set = set()
+    unique_prs: List[str] = []
+    for p in all_pr_refs:
+        if p not in seen_prs:
+            seen_prs.add(p)
+            if _is_pr_related_to_test(p, test_name):
+                unique_prs.append(p)
+
+    for jref in unique_jiras:
+        jstatus = jira_statuses.get(jref, {})
+        for pr in jstatus.get("pr_links", []):
+            if pr not in seen_prs:
+                seen_prs.add(pr)
+                unique_prs.append(pr)
+
+    summary = ""
+    if context_parts:
+        author, text = max(context_parts, key=lambda x: len(x[1]))
+        text = text[:200] + "..." if len(text) > 200 else text
+        summary = f"_{author}: {text}_" if author else text
+
+    return {"summary": summary, "jira_refs": unique_jiras, "pr_refs": unique_prs}
 
 
 def compose_slack_message(
@@ -350,6 +459,12 @@ def compose_slack_message(
         lines.append(f":jira: Full analysis report and artifacts attached to <{url}|{ticket_key}>")
     lines.append("")
 
+    vm = analysis.get("version_mismatch")
+    if vm and vm.get("has_mismatch"):
+        lines.append(f":rotating_light::rotating_light: *VERSION MISMATCH — TEST RESULTS MAY BE UNRELIABLE* :rotating_light::rotating_light:")
+        lines.append(f"Expected `{vm['expected_version']}` (FBC fragment) but operator installed is `{vm['installed_version']}`. Tests are running against the wrong operator version. Failures below may be caused by this mismatch rather than real bugs.")
+        lines.append("")
+
     total = analysis.get("total_tests", 0)
     passed = analysis.get("passed_tests", 0)
     failed = analysis.get("failed_tests", 0)
@@ -370,6 +485,17 @@ def compose_slack_message(
         step = pipeline.get("failed_step", "unknown")
         error = pipeline.get("exception_type", "unknown error")
         lines.append(f"• *Pipeline failure:* `{step}` — `{error}` (post-build, did not affect test execution)")
+
+    image_ages = analysis.get("cluster_image_ages")
+    if image_ages:
+        old = [i for i in image_ages if i.get('age_days') is not None and i['age_days'] > 7]
+        fresh = [i for i in image_ages if i.get('age_days') is not None and i['age_days'] <= 7]
+        if old:
+            lines.append(f":package: *Image Ages* ({len(fresh)} fresh, {len(old)} stale)")
+            for img in sorted(old, key=lambda x: -(x.get('age_days') or 0)):
+                lines.append(f"   • `{img['component']}` — {img['age_str']} :warning:")
+        else:
+            lines.append(f":package: *Image Ages:* all {len(fresh)} images fresh (<7d)")
     lines.append("")
 
     repeated = classified.get("repeated", [])
@@ -393,21 +519,20 @@ def compose_slack_message(
                 if key:
                     line += f"\n    <{url}|{key}> — {summary}"
 
-            for note in notes[:2]:
-                author = note.get("author", "")
-                text = note.get("text", "")
-                if len(text) > 200:
-                    text = text[:200] + "..."
-                if author and text:
-                    line += f"\n    _{author}: {text}_"
-                for jref in note.get("jira_refs", []):
-                    url = f"https://redhat.atlassian.net/browse/{jref}"
-                    jstatus = jira_statuses.get(jref, {})
-                    status_text = f" — *{jstatus['status']}*" if jstatus.get("status") else ""
-                    line += f"\n    :jira: <{url}|{jref}>{status_text}"
-                for pr in note.get("pr_refs", []):
-                    pr_short = pr.split("github.com/")[-1] if "github.com/" in pr else pr
-                    line += f"\n    :github: <{pr}|{pr_short}>"
+            synth = _synthesize_notes(name, notes, jira_statuses)
+            if synth["summary"]:
+                line += f"\n    {synth['summary']}"
+            for jref in synth["jira_refs"]:
+                jstatus = jira_statuses.get(jref, {})
+                if jstatus.get("summary", "").startswith("Nightly Analysis:"):
+                    continue
+                url = f"https://redhat.atlassian.net/browse/{jref}"
+                status_text = f" — *{jstatus['status']}*" if jstatus.get("status") else ""
+                link_text = f"{jref} — {jstatus['summary']}" if jstatus.get("summary") else jref
+                line += f"\n    :jira: <{url}|{link_text}>{status_text}"
+            for pr in synth["pr_refs"]:
+                pr_short = pr.split("github.com/")[-1] if "github.com/" in pr else pr
+                line += f"\n    :github: <{pr}|{pr_short}>"
 
             lines.append(line)
             lines.append("")
@@ -432,12 +557,6 @@ def compose_slack_message(
     if not repeated and not new:
         lines.append(":new: *New Failures*")
         lines.append("None — all failures are recurring from previous builds.")
-        lines.append("")
-
-    if flaky_tests:
-        names = ", ".join(f"`{t}`" for t in flaky_tests)
-        lines.append(f":recycle: *Flaky Tests (passed on retry)*")
-        lines.append(names)
         lines.append("")
 
     message = "\n".join(lines)

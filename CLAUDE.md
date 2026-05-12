@@ -186,6 +186,192 @@ The generated message already starts with the required disclaimer: `*NOTE: _This
 | `mcp__slack__get_channel_history` | Browse channel history with date filters |
 | `mcp__slack__send_dm` | Send DMs if needed |
 
+## Cluster Investigation
+
+When asked to investigate cluster issues (stuck namespaces, operator failures, deployment problems), use the following procedures. Credentials are in `.env`.
+
+### Login to clusters
+
+```bash
+# RHOAI cluster
+source .env && oc login "$RHOAI_API_SERVER" -u "$RHOAI_USERNAME" -p "$RHOAI_PASSWORD" --insecure-skip-tls-verify
+
+# ODH cluster
+source .env && oc login "$ODH_API_SERVER" -u "$ODH_USERNAME" -p "$ODH_PASSWORD" --insecure-skip-tls-verify
+```
+
+### Namespace stuck in Terminating
+
+```bash
+# 1. Find stuck namespaces
+oc get projects --no-headers | grep -i terminat
+
+# 2. Check conditions and finalizers
+oc get project <namespace> -o json | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print('Phase:', data.get('status', {}).get('phase'))
+for c in data.get('status', {}).get('conditions', []):
+    print(f\"  {c.get('type')}: {c.get('status')} - {c.get('message', '')[:200]}\")
+print('Finalizers:', data.get('spec', {}).get('finalizers', []))
+print('Deletion timestamp:', data.get('metadata', {}).get('deletionTimestamp'))
+"
+
+# 3. Find resources with stuck finalizers
+oc get deployments -n <namespace> -o json | python3 -c "
+import json, sys
+for item in json.load(sys.stdin).get('items', []):
+    name = item['metadata']['name']
+    finalizers = item['metadata'].get('finalizers', [])
+    deletion = item['metadata'].get('deletionTimestamp', 'N/A')
+    replicas = item.get('status', {}).get('readyReplicas', 0)
+    desired = item.get('spec', {}).get('replicas', 0)
+    print(f'{name}: finalizers={finalizers}, deletionTimestamp={deletion}, replicas={replicas}/{desired}')
+"
+
+# 4. Fix: remove stuck finalizer (confirm with user first)
+oc patch deployment <name> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge
+```
+
+### Operator health check (RHOAI/ODH)
+
+```bash
+# Check operator CSV and version
+oc get csv -n redhat-ods-operator
+
+# Check operator pods
+oc get pods -n redhat-ods-operator
+
+# Check DSCI and DSC status
+oc get dsci -A && oc get dsc -A
+
+# Check DSCI conditions
+oc get dsci default-dsci -o json | python3 -c "
+import json, sys
+for c in json.load(sys.stdin).get('status', {}).get('conditions', []):
+    print(f\"{c.get('type')}: {c.get('status')} — {c.get('reason', '')} — {c.get('message', '')[:300]}\")
+"
+
+# Check operator logs for errors (use leader pod)
+for pod in $(oc get pods -n redhat-ods-operator -o name); do
+    echo "=== $pod ==="
+    oc logs $pod -n redhat-ods-operator --tail=20 2>&1 | tail -5
+    echo
+done
+
+# Check specific resources
+oc get pods -n redhat-ods-applications
+oc get auths.services.platform.opendatahub.io -n redhat-ods-operator
+
+# Check operator image and verify manifest contents
+oc get csv <csv-name> -n redhat-ods-operator -o jsonpath='{.spec.install.spec.deployments[0].spec.template.spec.containers[0].image}'
+oc exec deployment/rhods-operator -n redhat-ods-operator -- ls /opt/manifests/
+```
+
+### Build failure diagnosis
+
+When a build fails (especially at infra stages like "Deploy RHOAI operator"), follow this diagnostic sequence:
+
+```bash
+# 1. Fetch build info and identify the failure stage
+source .env && curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" \
+    "$JENKINS_URL/job/components/job/dashboard/job/dashboard-e2e-tests/<build>/api/json?tree=result,description,timestamp,duration,building"
+
+# 2. Get console output and find the error
+source .env && curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" \
+    "$JENKINS_URL/job/components/job/dashboard/job/dashboard-e2e-tests/<build>/consoleText" > /tmp/console_<build>.txt
+
+# 3. Identify which cluster/product
+grep -E '(PRODUCT|CLUSTER_NAME)' /tmp/console_<build>.txt | head -3
+
+# 4. List pipeline stages
+grep -E '\{ \(' /tmp/console_<build>.txt
+
+# 5. Find the failure
+grep -B5 -A10 'FAIL\|ERROR\|failed after retrying\|skipped due to earlier' /tmp/console_<build>.txt | head -40
+
+# 6. Login to the affected cluster and check state
+source .env && oc login "$RHOAI_API_SERVER" -u "$RHOAI_USERNAME" -p "$RHOAI_PASSWORD" --insecure-skip-tls-verify
+# or for ODH:
+source .env && oc login "$ODH_API_SERVER" -u "$ODH_USERNAME" -p "$ODH_PASSWORD" --insecure-skip-tls-verify
+```
+
+### Known operator issues and fixes
+
+**Segment.io manifests missing from operator image (`/opt/manifests/segment`)**
+- Symptom: DSCI stuck in `Progressing`/`ReconcileInit`, Auth CR never created, build fails with "Auth does not exist"
+- Operator logs show: `lstat /opt/manifests/segment: no such file or directory`
+- Root cause: Operator image doesn't include segment manifests despite code expecting them (PR #3420 removed, PR #3519 re-added, but image wasn't rebuilt)
+- Fix: Create the resources manually, then restart the operator:
+```bash
+oc create configmap odh-segment-key-config --from-literal=segmentKeyEnabled="true" -n redhat-ods-applications
+oc create secret generic odh-segment-key --from-literal=segmentKey="$(echo 'S1JVaG9CSUVwV2xHdXo0c1dpeGFlMXZBWEtLR2xENUs=' | base64 -d)" -n redhat-ods-applications
+oc rollout restart deployment/rhods-operator -n redhat-ods-operator
+oc rollout status deployment/rhods-operator -n redhat-ods-operator --timeout=120s
+# Verify:
+sleep 30 && oc get dsci default-dsci -o jsonpath='{.status.conditions[?(@.type=="ReconcileComplete")].status}'
+# Should return "True"
+oc get auths.services.platform.opendatahub.io -A
+# Should show auth with READY=True
+```
+- Note: This fix is wiped every time the cleanup stage deletes `redhat-ods-applications` namespace. Must be re-applied after each cleanup until the operator image is rebuilt with the segment manifests included.
+
+**maas-controller finalizer deadlock (`maas.opendatahub.io/cleanup`)**
+- Symptom: `redhat-ods-applications` namespace stuck in `Terminating` indefinitely
+- Root cause: `LifecycleReconciler` (PR #870) adds a self-referencing finalizer to the maas-controller Deployment. When namespace is deleted, the controller pod dies before removing its own finalizer.
+- Fix:
+```bash
+oc patch deployment maas-controller -n redhat-ods-applications -p '{"metadata":{"finalizers":null}}' --type=merge
+```
+
+### Leftover test projects
+
+Test namespaces matching `*-NNNNN` pattern are only cleaned up at the START of the next build (`cleanupCypressTestNamespaces()` in `runDashboardTestStages.groovy` line 50), not after test completion. Projects remain until the next nightly runs.
+
+```bash
+# List leftover test projects
+oc get projects -o name | grep -E '\-[0-9]{5,}$'
+```
+
+### GitHub investigation for operator/component issues
+
+```bash
+# Search for code references
+gh search code "<search-term>" --repo opendatahub-io/<repo> --limit 20
+
+# Find commits touching a file
+gh api "repos/opendatahub-io/<repo>/commits?path=<file-path>&per_page=10" \
+    --jq '.[] | "\(.sha[0:8]) \(.commit.author.date[0:10]) \(.commit.message | split("\n")[0])"'
+
+# Get PR details
+gh api repos/opendatahub-io/<repo>/pulls/<number> \
+    --jq '{title: .title, created: .created_at, merged: .merged_at, author: .user.login, body: .body[0:500]}'
+
+# Check if a commit is in a tag/release
+gh api "repos/opendatahub-io/<repo>/compare/<commit>...<tag>" \
+    --jq '{status: .status, ahead_by: .ahead_by}'
+
+# Get files changed in a PR
+gh api "repos/opendatahub-io/<repo>/pulls/<number>/files" --jq '.[].filename'
+```
+
+### Key repos for operator issues
+- **[opendatahub-io/opendatahub-operator](https://github.com/opendatahub-io/opendatahub-operator)** — RHOAI/ODH operator. DSCI controller, component reconcilers, monitoring, Dockerfiles.
+- **[opendatahub-io/models-as-a-service](https://github.com/opendatahub-io/models-as-a-service)** — MaaS controller (maas-controller). Tenant CRs, LifecycleReconciler, finalizers.
+
+### Jenkins shared library (GitLab)
+
+The Jenkins pipeline scripts live on GitLab (project ID 222109, `tguzik/jenkins`):
+- `dashboardPostBuild.groovy` — Post-build steps (report portal, etc.)
+- `dashboardHelper.groovy` — `cleanupCypressTestNamespaces()` at line 1116
+- `runDashboardTestStages.groovy` — Calls cleanup at line 50 during "Verify Cluster is Ready"
+
+```bash
+# Fetch a file from GitLab
+source .env && curl -s --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+    "$GITLAB_URL/api/v4/projects/222109/repository/files/<path>/raw?ref=master"
+```
+
 ## Context Repositories
 
 When analyzing failures or understanding component behavior, consult these external repos:

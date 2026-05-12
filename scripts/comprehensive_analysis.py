@@ -2186,6 +2186,7 @@ async def main():
         print("  --no-artifacts-download   Skip downloading screenshots/videos from Jenkins")
         print("                            (report will not have embedded images or local videos)")
         print("  --skip-jira               Skip Jira lock ticket and result publishing")
+        print("  --skip-reruns             Skip test reruns")
         print("\nExamples:")
         print("  python comprehensive_analysis.py 3565 odh")
         print("  python comprehensive_analysis.py latest rhoai")
@@ -2198,6 +2199,7 @@ async def main():
     enable_trend_analysis = '--enable-trend' in sys.argv
     download_artifacts = '--no-artifacts-download' not in sys.argv
     skip_jira = '--skip-jira' in sys.argv
+    skip_reruns = '--skip-reruns' in sys.argv
     
     # Create jenkins client for build lookup
     jenkins_cli = jenkins_client.JenkinsClient(
@@ -2932,7 +2934,9 @@ async def main():
     # Check if this is a post-test failure (like Post Actions)
     is_post_test_failure = pipeline_failure.get('is_post_test_failure', False)
     
-    if is_pre_test_failure:
+    if skip_reruns:
+        skip_reason = "Reruns skipped (--skip-reruns)"
+    elif is_pre_test_failure:
         skip_reason = f"Pipeline deployment failure: {pipeline_failure['failed_step']}"
     elif len(failures) == 0:
         skip_reason = "No failures to rerun"
