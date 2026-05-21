@@ -559,6 +559,11 @@ def compose_slack_message(
         lines.append("None — all failures are recurring from previous builds.")
         lines.append("")
 
+    if flaky_tests:
+        lines.append(":recycle: *Flaky Tests (passed on retry)*")
+        lines.append(", ".join(f"`{t}`" for t in flaky_tests))
+        lines.append("")
+
     message = "\n".join(lines)
     if len(message) > SLACK_CHAR_LIMIT:
         message = message[:SLACK_CHAR_LIMIT - 20] + "\n... (truncated)"

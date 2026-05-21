@@ -43,10 +43,11 @@ There is no test suite. Verify changes by running the analyzer against a real bu
 ### External Services
 - **Jenkins** — `JENKINS_URL` + `JENKINS_USER`/`JENKINS_TOKEN` (Basic Auth)
 - **Jira** — `JIRA_URL` + `JIRA_USER`/`JIRA_TOKEN` (Atlassian Cloud, Basic Auth, API v3)
-- **OpenShift** — `RHOAI_API_SERVER`/`ODH_API_SERVER` + credentials (read-only `oc` CLI)
+- **OpenShift** — `RHOAI_API_SERVER`/`ODH_API_SERVER` + credentials (read-only `oc` CLI). Also accessible via the Kubernetes MCP server (see below).
 - **GitLab** — `GITLAB_URL` + `GITLAB_TOKEN` (commit tracking)
 - **Tracer** — `TRACER_PATH` (optional, image metadata extraction)
 - **Slack** — [redhat-community-ai-tools/slack-mcp](https://github.com/redhat-community-ai-tools/slack-mcp) MCP server. Read channel history and send analysis summaries.
+- **Kubernetes/OpenShift** — [kubernetes-mcp-server](https://github.com/openshift/openshift-mcp-server) MCP server (full read-write). Provides direct access to pods, logs, events, namespaces, resource metrics, and OpenShift projects without needing `oc login`. Also supports write operations: create/update/delete resources, exec into pods, scale deployments. Uses `~/.kube/config`.
 
 ## Code Conventions
 
@@ -186,11 +187,49 @@ The generated message already starts with the required disclaimer: `*NOTE: _This
 | `mcp__slack__get_channel_history` | Browse channel history with date filters |
 | `mcp__slack__send_dm` | Send DMs if needed |
 
+#### Kubernetes MCP tool reference
+See the full tool table in the [Cluster Investigation](#cluster-investigation) section. Key tools for nightly analysis:
+- `mcp__kubernetes-mcp-server__pods_list_in_namespace` — check pod health in `redhat-ods-operator` / `redhat-ods-applications`
+- `mcp__kubernetes-mcp-server__pods_log` — fetch operator/component logs
+- `mcp__kubernetes-mcp-server__events_list` — find warnings and errors
+- `mcp__kubernetes-mcp-server__resources_get` — inspect CSVs, DSCIs, DSCs, and custom resources
+
 ## Cluster Investigation
 
-When asked to investigate cluster issues (stuck namespaces, operator failures, deployment problems), use the following procedures. Credentials are in `.env`.
+When asked to investigate cluster issues (stuck namespaces, operator failures, deployment problems), **prefer the Kubernetes MCP tools** over `oc` CLI for read-only operations. The MCP server connects via `~/.kube/config` and avoids the need to `oc login` each time. Fall back to `oc` CLI only when MCP tools don't cover the operation (e.g., `oc exec`, `oc patch`, custom resource queries with complex JSONPath).
+
+### Kubernetes MCP tool reference
+
+| Tool | Purpose | Replaces |
+|------|---------|----------|
+| `mcp__kubernetes-mcp-server__pods_list` | List pods across all namespaces | `oc get pods -A` |
+| `mcp__kubernetes-mcp-server__pods_list_in_namespace` | List pods in a specific namespace | `oc get pods -n <ns>` |
+| `mcp__kubernetes-mcp-server__pods_get` | Get pod details (status, containers, conditions) | `oc get pod <name> -o json` |
+| `mcp__kubernetes-mcp-server__pods_log` | Get pod logs (with container/tail/previous options) | `oc logs <pod>` |
+| `mcp__kubernetes-mcp-server__pods_top` | Pod CPU/memory metrics | `oc adm top pods` |
+| `mcp__kubernetes-mcp-server__nodes_top` | Node CPU/memory metrics | `oc adm top nodes` |
+| `mcp__kubernetes-mcp-server__nodes_log` | Node system logs (kubelet, kube-proxy) | SSH + journalctl |
+| `mcp__kubernetes-mcp-server__nodes_stats_summary` | Detailed node stats (CPU, memory, filesystem, PSI) | `oc describe node` |
+| `mcp__kubernetes-mcp-server__events_list` | Cluster events (warnings, errors) | `oc get events -A` |
+| `mcp__kubernetes-mcp-server__namespaces_list` | List namespaces | `oc get namespaces` |
+| `mcp__kubernetes-mcp-server__projects_list` | List OpenShift projects | `oc get projects` |
+| `mcp__kubernetes-mcp-server__resources_get` | Get any resource by apiVersion/kind/name | `oc get <resource> <name> -o json` |
+| `mcp__kubernetes-mcp-server__resources_list` | List any resource type with label/field selectors | `oc get <resource> -A` |
+| `mcp__kubernetes-mcp-server__resources_create_or_update` | Create or update any resource from YAML/JSON | `oc apply -f` |
+| `mcp__kubernetes-mcp-server__resources_delete` | Delete any resource | `oc delete <resource> <name>` |
+| `mcp__kubernetes-mcp-server__resources_scale` | Get or update replica count | `oc scale deployment` |
+| `mcp__kubernetes-mcp-server__pods_delete` | Delete a pod | `oc delete pod <name>` |
+| `mcp__kubernetes-mcp-server__pods_exec` | Execute commands in a pod | `oc exec <pod> -- <cmd>` |
+| `mcp__kubernetes-mcp-server__pods_run` | Run a container image as a pod | `oc run` |
+| `mcp__kubernetes-mcp-server__configuration_contexts_list` | List kubeconfig contexts | `oc config get-contexts` |
+
+Use the `context` parameter to target a specific cluster without switching contexts. Use `labelSelector` and `fieldSelector` parameters to filter results.
+
+**Write operations** (create, update, delete, scale, exec) are available but should be used with caution. Always confirm destructive operations with the user before executing.
 
 ### Login to clusters
+
+Use `oc login` only when MCP tools are unavailable or when write operations are needed. The MCP server reads from `~/.kube/config` which already has contexts for all clusters after login.
 
 ```bash
 # RHOAI cluster
@@ -202,67 +241,66 @@ source .env && oc login "$ODH_API_SERVER" -u "$ODH_USERNAME" -p "$ODH_PASSWORD" 
 
 ### Namespace stuck in Terminating
 
-```bash
-# 1. Find stuck namespaces
-oc get projects --no-headers | grep -i terminat
+```python
+# Via MCP tools (preferred for steps 1-3):
+# 1. Find stuck namespaces — list all projects and check for Terminating phase
+mcp__kubernetes-mcp-server__projects_list()
 
-# 2. Check conditions and finalizers
-oc get project <namespace> -o json | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-print('Phase:', data.get('status', {}).get('phase'))
-for c in data.get('status', {}).get('conditions', []):
-    print(f\"  {c.get('type')}: {c.get('status')} - {c.get('message', '')[:200]}\")
-print('Finalizers:', data.get('spec', {}).get('finalizers', []))
-print('Deletion timestamp:', data.get('metadata', {}).get('deletionTimestamp'))
-"
+# 2. Check conditions and finalizers on a specific namespace
+mcp__kubernetes-mcp-server__resources_get(apiVersion="v1", kind="Namespace", name="<namespace>")
 
 # 3. Find resources with stuck finalizers
-oc get deployments -n <namespace> -o json | python3 -c "
-import json, sys
-for item in json.load(sys.stdin).get('items', []):
-    name = item['metadata']['name']
-    finalizers = item['metadata'].get('finalizers', [])
-    deletion = item['metadata'].get('deletionTimestamp', 'N/A')
-    replicas = item.get('status', {}).get('readyReplicas', 0)
-    desired = item.get('spec', {}).get('replicas', 0)
-    print(f'{name}: finalizers={finalizers}, deletionTimestamp={deletion}, replicas={replicas}/{desired}')
-"
+mcp__kubernetes-mcp-server__resources_list(apiVersion="apps/v1", kind="Deployment", namespace="<namespace>")
 
-# 4. Fix: remove stuck finalizer (confirm with user first)
+# 4. Check events for clues
+mcp__kubernetes-mcp-server__events_list(namespace="<namespace>")
+```
+
+```python
+# Via MCP tools (for write operations — confirm with user first):
+# 4. Fix: delete stuck pod to force reschedule
+mcp__kubernetes-mcp-server__pods_delete(name="<pod>", namespace="<namespace>")
+
+# 4b. Or remove stuck finalizer by updating the resource
+mcp__kubernetes-mcp-server__resources_create_or_update(...)  # patch the resource with finalizers: null
+```
+
+```bash
+# Via oc CLI (fallback for patches):
 oc patch deployment <name> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge
 ```
 
 ### Operator health check (RHOAI/ODH)
 
-```bash
+Prefer MCP tools for the read-only checks. Fall back to `oc` for operations MCP doesn't cover (exec, complex JSONPath).
+
+```python
+# Via MCP tools (preferred):
 # Check operator CSV and version
-oc get csv -n redhat-ods-operator
+mcp__kubernetes-mcp-server__resources_list(apiVersion="operators.coreos.com/v1alpha1", kind="ClusterServiceVersion", namespace="redhat-ods-operator")
 
 # Check operator pods
-oc get pods -n redhat-ods-operator
+mcp__kubernetes-mcp-server__pods_list_in_namespace(namespace="redhat-ods-operator")
 
 # Check DSCI and DSC status
-oc get dsci -A && oc get dsc -A
+mcp__kubernetes-mcp-server__resources_list(apiVersion="dscinitialization.opendatahub.io/v1", kind="DSCInitialization")
+mcp__kubernetes-mcp-server__resources_list(apiVersion="datasciencecluster.opendatahub.io/v1", kind="DataScienceCluster")
 
-# Check DSCI conditions
-oc get dsci default-dsci -o json | python3 -c "
-import json, sys
-for c in json.load(sys.stdin).get('status', {}).get('conditions', []):
-    print(f\"{c.get('type')}: {c.get('status')} — {c.get('reason', '')} — {c.get('message', '')[:300]}\")
-"
+# Check operator logs
+mcp__kubernetes-mcp-server__pods_log(name="<operator-pod>", namespace="redhat-ods-operator", tail=50)
 
-# Check operator logs for errors (use leader pod)
-for pod in $(oc get pods -n redhat-ods-operator -o name); do
-    echo "=== $pod ==="
-    oc logs $pod -n redhat-ods-operator --tail=20 2>&1 | tail -5
-    echo
-done
+# Check pods in applications namespace
+mcp__kubernetes-mcp-server__pods_list_in_namespace(namespace="redhat-ods-applications")
 
-# Check specific resources
-oc get pods -n redhat-ods-applications
-oc get auths.services.platform.opendatahub.io -n redhat-ods-operator
+# Check events for errors
+mcp__kubernetes-mcp-server__events_list(namespace="redhat-ods-operator")
 
+# Check any custom resource
+mcp__kubernetes-mcp-server__resources_get(apiVersion="services.platform.opendatahub.io/v1alpha1", kind="Auth", name="<name>", namespace="redhat-ods-operator")
+```
+
+```bash
+# Via oc CLI (fallback — for exec and complex queries):
 # Check operator image and verify manifest contents
 oc get csv <csv-name> -n redhat-ods-operator -o jsonpath='{.spec.install.spec.deployments[0].spec.template.spec.containers[0].image}'
 oc exec deployment/rhods-operator -n redhat-ods-operator -- ls /opt/manifests/
@@ -319,7 +357,8 @@ oc get auths.services.platform.opendatahub.io -A
 **maas-controller finalizer deadlock (`maas.opendatahub.io/cleanup`)**
 - Symptom: `redhat-ods-applications` namespace stuck in `Terminating` indefinitely
 - Root cause: `LifecycleReconciler` (PR #870) adds a self-referencing finalizer to the maas-controller Deployment. When namespace is deleted, the controller pod dies before removing its own finalizer.
-- Fix:
+- Diagnose via MCP: `mcp__kubernetes-mcp-server__resources_get(apiVersion="apps/v1", kind="Deployment", name="maas-controller", namespace="redhat-ods-applications")` — check `metadata.finalizers`
+- Fix (confirm with user first):
 ```bash
 oc patch deployment maas-controller -n redhat-ods-applications -p '{"metadata":{"finalizers":null}}' --type=merge
 ```
@@ -328,8 +367,14 @@ oc patch deployment maas-controller -n redhat-ods-applications -p '{"metadata":{
 
 Test namespaces matching `*-NNNNN` pattern are only cleaned up at the START of the next build (`cleanupCypressTestNamespaces()` in `runDashboardTestStages.groovy` line 50), not after test completion. Projects remain until the next nightly runs.
 
+```python
+# Via MCP tools (preferred):
+mcp__kubernetes-mcp-server__projects_list()
+# Then filter results for names matching *-NNNNN pattern
+```
+
 ```bash
-# List leftover test projects
+# Via oc CLI (fallback):
 oc get projects -o name | grep -E '\-[0-9]{5,}$'
 ```
 
@@ -392,3 +437,4 @@ When analyzing failures or understanding component behavior, consult these exter
 - Don't hardcode Jenkins/Jira/cluster URLs or credentials
 - Don't break the graceful degradation pattern — every external service must be optional
 - Don't add dependencies without updating `requirements.txt`
+- Don't ask the user to run commands during analysis — investigate autonomously using grep, Read, and shell tools on console logs, test source code, and external APIs

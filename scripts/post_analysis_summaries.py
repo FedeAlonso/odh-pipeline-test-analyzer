@@ -101,12 +101,27 @@ async def cmd_jira(args):
     sys.exit(0 if success else 1)
 
 
+def _normalize_slack_data(data):
+    """Normalize slack data: convert dict-format messages to '[ts] text' strings."""
+    search_results = data["search_results"]
+    thread_data = data["thread_data"]
+
+    if search_results and isinstance(search_results[0], dict):
+        search_results = [f"[{m['ts']}] {m.get('text', '')}" for m in search_results]
+    normalized_threads = {}
+    for ts, msgs in thread_data.items():
+        if msgs and isinstance(msgs[0], dict):
+            normalized_threads[ts] = [f"[{m['ts']}] {m.get('text', '')}" for m in msgs]
+        else:
+            normalized_threads[ts] = msgs
+    return search_results, normalized_threads
+
+
 async def cmd_slack(args):
     with open(args.data) as f:
         data = json.load(f)
 
-    search_results = data["search_results"]
-    thread_data = data["thread_data"]
+    search_results, thread_data = _normalize_slack_data(data)
 
     real_failures = [t.strip() for t in args.real_failures.split(",")] if args.real_failures else []
     flaky = [t.strip() for t in args.flaky.split(",")] if args.flaky else []
