@@ -129,6 +129,18 @@ After presenting the report:
 - Consult the architecture-context repo if component relationships are relevant to understanding a failure
 - Consult the odh-dashboard repo to look at the actual test code for any confusing failures
 
+### 4b. Deep analysis of uninvestigated failures
+After the initial analysis, check each real failure (not flaky) for existing investigation context: a known Jira bug, a prior deep analysis in a previous thread, or a clear root cause from the automated report. For any failure that **lacks** this context, automatically perform a deeper investigation:
+- Read the test source code in odh-dashboard to understand what it does and where it fails
+- Search for recent PRs that touch the relevant code paths (model serving, model registry, MLflow, etc.)
+- Check cluster state via K8s MCP tools (pod health, events, resource pressure, stuck resources)
+- Search Jira for related tickets
+- Look at screenshots/videos from the failure artifacts
+
+**Only do this if fewer than 15 tests need deep investigation.** If 15+, post a summary and ask the user which failures to prioritize.
+
+Post **one Slack message per test** — not grouped by cluster or category. Each message should be a self-contained deep analysis of that specific test failure, threaded on the Jenkins Bot message.
+
 ### 5. Post agent analysis summary to Jira
 After analyzing the results, post a structured **agent analysis summary** as a comment on the lock ticket using `scripts/post_analysis_summaries.py jira`. Pass real failures as `name:error:jira_key` comma-separated, cluster pods as `total:running:failed`, and pipeline failure as `step:exception`. Use `--extra-notes` for key observations from the analysis.
 
