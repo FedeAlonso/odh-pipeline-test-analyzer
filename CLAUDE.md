@@ -139,7 +139,7 @@ After the initial analysis, check each real failure (not flaky) for existing inv
 
 **Only do this if fewer than 15 tests need deep investigation.** If 15+, post a summary and ask the user which failures to prioritize.
 
-Post **one Slack message per test** — not grouped by cluster or category. Each message should be a self-contained deep analysis of that specific test failure, threaded on the Jenkins Bot message.
+Post results as **one Slack message per test or per failure cluster**, threaded on the Jenkins Bot message. Use per-test messages when failures have distinct root causes. Group into a single cluster message when multiple tests share the same root cause (e.g., 8 model serving tests all broken by the same PR). Each message should be self-contained with full context.
 
 ### 5. Post agent analysis summary to Jira
 After analyzing the results, post a structured **agent analysis summary** as a comment on the lock ticket using `scripts/post_analysis_summaries.py jira`. Pass real failures as `name:error:jira_key` comma-separated, cluster pods as `total:running:failed`, and pipeline failure as `step:exception`. Use `--extra-notes` for key observations from the analysis.
