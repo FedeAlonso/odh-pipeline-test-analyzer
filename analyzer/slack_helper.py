@@ -332,7 +332,9 @@ def classify_failures(
     repeated.sort(key=lambda r: r.get("days_broken") or 0, reverse=True)
     new.sort(key=lambda n: n["test_name"])
 
-    return {"repeated": repeated, "new": new}
+    build_thread_map = {h["build_number"]: h["thread_ts"] for h in history_by_build if h.get("thread_ts")}
+
+    return {"repeated": repeated, "new": new, "_build_thread_map": build_thread_map}
 
 
 _pr_title_cache: Dict[str, Optional[str]] = {}
@@ -388,9 +390,11 @@ def _synthesize_notes(
         ).strip()
         if re.match(r'^same\s+(?:issues?|errors?|failures?)\s+as\s+(?:yesterday|before|last)', text, re.IGNORECASE):
             continue
-        text = re.sub(r'https?://\S+', '', text).strip()
-        text = re.sub(r'RHOAIENG-\d+\s*(?:created)?\.?\s*', '', text).strip()
-        text = re.sub(r'[\s.]+$', '', text).strip()
+        text = re.sub(r'(?:PR\s+)?https?://\S+(?:\s+(?:might|should|could|will|would)\s+\w+\s+it)?', '', text).strip()
+        text = re.sub(r'RHOAIENG-\d+\s*(?:created|tracks?\s+(?:the\s+)?(?:fix|issue|bug))?\.?\s*', '', text).strip()
+        text = re.sub(r'\b(?:See|see|check|Check)\s+for\s+(?:details|more\s+info|context)\.?', '', text).strip()
+        text = re.sub(r'\s{2,}', ' ', text).strip()
+        text = re.sub(r'[\s.,;:—\-]+$', '', text).strip()
 
         if text and len(text) > 15:
             context_parts.append((note.get("author", ""), text))
@@ -429,11 +433,19 @@ def _synthesize_notes(
     return {"summary": summary, "jira_refs": unique_jiras, "pr_refs": unique_prs}
 
 
+def _slack_thread_link(channel_id: str, thread_ts: str) -> str:
+    """Build a Slack message permalink from channel ID and thread timestamp."""
+    ts_no_dot = thread_ts.replace(".", "")
+    return f"https://redhat-internal.slack.com/archives/{channel_id}/p{ts_no_dot}"
+
+
 def compose_slack_message(
     analysis: Dict[str, Any],
     classified: Dict[str, Any],
     flaky_tests: Optional[List[str]] = None,
     jira_statuses: Optional[Dict[str, Dict[str, Any]]] = None,
+    image_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+    channel_id: Optional[str] = None,
 ) -> str:
     """
     Compose a Slack mrkdwn-formatted message for the Jenkins Bot thread.
@@ -441,10 +453,13 @@ def compose_slack_message(
     Args:
         analysis: Build analysis results with keys: build_number, platform,
                   total_tests, passed_tests, failed_tests, jira_ticket_key,
-                  jira_ticket_url, cluster_health, pipeline_failure.
+                  jira_ticket_url, cluster_health, pipeline_failure,
+                  rhoai_build_notification_url (optional).
         classified: Output from classify_failures().
         flaky_tests: List of test names that passed on retry.
         jira_statuses: {jira_key: {"status": str, "summary": str, "latest_comment": str}}
+        image_metadata: Tracer metadata per image type (operator_bundle, dashboard, fbc_fragment, iib).
+        channel_id: Slack channel ID for building message permalinks to previous build threads.
     """
     flaky_tests = flaky_tests or []
     jira_statuses = jira_statuses or {}
@@ -496,6 +511,44 @@ def compose_slack_message(
                 lines.append(f"   • `{img['component']}` — {img['age_str']} :warning:")
         else:
             lines.append(f":package: *Image Ages:* all {len(fresh)} images fresh (<7d)")
+
+    if image_metadata:
+        deploy_lines = []
+        op_meta = image_metadata.get("operator_bundle", {})
+        if op_meta and op_meta.get("full_image_uri"):
+            sha = op_meta["full_image_uri"]
+            short_sha = sha.split("@")[-1][:19] if "@" in sha else sha.split(":")[-1][:19]
+            parts = [f"`{short_sha}`"]
+            if op_meta.get("build_date"):
+                parts.append(f"Built: {op_meta['build_date']}")
+            if op_meta.get("rhoai_version"):
+                parts.append(f"RHOAI {op_meta['rhoai_version']}")
+            notif_url = analysis.get("rhoai_build_notification_url")
+            if notif_url:
+                parts.append(f"<{notif_url}|build notification>")
+            elif analysis.get("platform", "").upper() == "RHOAI":
+                parts.append("_not found in #rhoai-build-notifications_")
+            deploy_lines.append(f"• *Operator:* {' | '.join(parts)}")
+
+        dash_meta = image_metadata.get("dashboard", {})
+        if dash_meta:
+            commit = (dash_meta.get("commit_sha_full") or "")[:12]
+            url = dash_meta.get("commit_url", "")
+            if commit and url:
+                deploy_lines.append(f"• *Dashboard:* commit <{url}|`{commit}`>")
+            elif commit:
+                deploy_lines.append(f"• *Dashboard:* commit `{commit}`")
+
+        fbc_meta = image_metadata.get("fbc_fragment", {})
+        if fbc_meta and fbc_meta.get("full_image_uri"):
+            fbc_uri = fbc_meta["full_image_uri"]
+            short = fbc_uri.split("/")[-1] if "/" in fbc_uri else fbc_uri
+            deploy_lines.append(f"• *FBC Fragment:* `{short}`")
+
+        if deploy_lines:
+            lines.append(":gear: *Deployment Info*")
+            lines.extend(deploy_lines)
+
     lines.append("")
 
     repeated = classified.get("repeated", [])
@@ -507,17 +560,28 @@ def compose_slack_message(
             days = f.get("days_broken")
             jiras = f.get("jira_issues", [])
             notes = f.get("investigation_notes", [])
+            seen_in = f.get("seen_in_builds", [])
 
             line = f"• `{name}`"
             if days is not None:
                 line += f"\n        Note - this is now broken {days} days :warning:"
+
+            if seen_in and channel_id:
+                build_links = []
+                for b in classified.get("_build_thread_map", {}).items():
+                    bnum, bts = b
+                    if bnum in seen_in:
+                        link = _slack_thread_link(channel_id, bts)
+                        build_links.append(f"<{link}|#{bnum}>")
+                if build_links:
+                    line += f"\n    :speech_balloon: Previous: {', '.join(build_links)}"
 
             for jira in jiras[:2]:
                 key = jira.get("key", "")
                 url = jira.get("url", f"https://redhat.atlassian.net/browse/{key}")
                 summary = jira.get("summary", "")
                 if key:
-                    line += f"\n    <{url}|{key}> — {summary}"
+                    line += f"\n    :jira: <{url}|{key}> — {summary}"
 
             synth = _synthesize_notes(name, notes, jira_statuses)
             if synth["summary"]:
@@ -550,7 +614,7 @@ def compose_slack_message(
                 url = jira.get("url", f"https://redhat.atlassian.net/browse/{key}")
                 summary = jira.get("summary", "")
                 if key:
-                    line += f" — <{url}|{key}> ({summary})"
+                    line += f" — :jira: <{url}|{key}> ({summary})"
             lines.append(line)
         lines.append("")
 
@@ -589,6 +653,8 @@ def prepare_slack_message(
     flaky_tests: List[str],
     analysis: Dict[str, Any],
     jira_statuses: Optional[Dict[str, Dict[str, Any]]] = None,
+    image_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+    channel_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     End-to-end: takes raw MCP data and returns a ready-to-post Slack message.
@@ -601,9 +667,12 @@ def prepare_slack_message(
         current_failures: Test names that failed (real failures, not flaky).
         flaky_tests: Test names that passed on retry.
         analysis: Dict with keys: total_tests, passed_tests, failed_tests,
-                  jira_ticket_key, jira_ticket_url, cluster_health, pipeline_failure.
+                  jira_ticket_key, jira_ticket_url, cluster_health, pipeline_failure,
+                  rhoai_build_notification_url (optional).
         jira_statuses: {jira_key: {"status": str, "summary": str, "latest_comment": str}}
                        from jira_lock.fetch_jira_statuses().
+        image_metadata: Tracer metadata per image type from comprehensive_analysis.
+        channel_id: Slack channel ID for building message permalinks.
 
     Returns:
         {"thread_ts": str or None, "message": str} — ready to pass to mcp__slack__post_message.
@@ -632,6 +701,6 @@ def prepare_slack_message(
 
     analysis["build_number"] = build_number
     analysis["platform"] = platform
-    message = compose_slack_message(analysis, classified, flaky_tests, jira_statuses)
+    message = compose_slack_message(analysis, classified, flaky_tests, jira_statuses, image_metadata, channel_id)
 
     return {"thread_ts": thread_ts, "message": message}

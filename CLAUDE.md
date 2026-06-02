@@ -136,10 +136,33 @@ After the initial analysis, check each real failure (not flaky) for existing inv
 - Check cluster state via K8s MCP tools (pod health, events, resource pressure, stuck resources)
 - Search Jira for related tickets
 - Look at screenshots/videos from the failure artifacts
+- **Check operator age and version** — how old is the deployed operator image? When was it built? Is it running an outdated version that's missing fixes? Use tracer output, CSV metadata, or `oc get csv` to determine the operator build date and version. If the operator is more than a few days old, note this — stale operator images are a common source of "fixed but still failing" issues.
+- **Search for related PRs** — use `gh search code`, `gh api repos/.../commits`, and `gh pr list` to find PRs that recently touched the relevant code paths. For each PR, note: title, author, merge date, and whether it's in the deployed image. Pay attention to PRs merged AFTER the operator image was built — those fixes won't be in this build.
+- **Search for related Jira tickets** — search RHOAIENG project for tickets mentioning the test name, the component, or the error message. For each ticket, note: key, summary, status, assignee, and any recent comments that indicate progress or a fix.
+- **Check the console log** — grep the Jenkins console output for the specific test name to find the exact error, timing, and any cluster events that correlate with the failure.
 
 **Only do this if fewer than 15 tests need deep investigation.** If 15+, post a summary and ask the user which failures to prioritize.
 
-Post results as **one Slack message per failure cluster**, threaded on the Jenkins Bot message. Group tests that share the same root cause into a single message (e.g., 8 model serving tests all broken by the same PR, 3 MLflow tests caused by the same DSC config issue). Each message should be self-contained with full context.
+Post results as **one Jira comment per failure cluster** on the lock ticket. Group tests that share the same root cause into a single comment (e.g., 8 model serving tests all broken by the same PR, 3 MLflow tests caused by the same DSC config issue). Each comment should be self-contained with full context.
+
+### 4c. Update reports with deep analysis findings
+After the deep analysis completes, **append the findings to the MD report** and **regenerate the HTML report**. The reports are the permanent record and must contain the complete picture — not just the automated script output.
+
+For each failure cluster, append a section to the MD report under a new `## 🔬 Deep Analysis` heading at the end, containing:
+- **Root cause** — what actually went wrong, not just the error message
+- **Related PRs** — links to PRs that caused, fixed, or are related to the failure, with their status (merged/open/closed)
+- **Related Jira tickets** — links with current status (New/In Progress/Review/Resolved)
+- **Trend** — is this persistent, new, regressed, or recovered vs previous builds?
+- **Reclassification** — if the deep analysis reveals a test is actually flaky (passed on retry) or has a different root cause than initially categorized
+- **Recommended action** — what needs to happen to fix this
+
+After updating the MD, regenerate the HTML:
+```bash
+venv/bin/python scripts/comprehensive_analysis.py --regenerate-html reports/current/{RHOAI|ODH}/latest-build-{N}.md
+```
+If `--regenerate-html` is not available, use the report_generator module directly or convert with pandoc.
+
+Then re-upload both updated files to the Jira lock ticket (delete old attachments first if needed).
 
 ### 5. Post agent analysis summary to Jira
 After analyzing the results, post a structured **agent analysis summary** as a comment on the lock ticket using `scripts/post_analysis_summaries.py jira`. Pass real failures as `name:error:jira_key` comma-separated, cluster pods as `total:running:failed`, and pipeline failure as `step:exception`. Use `--extra-notes` for key observations from the analysis.
@@ -167,28 +190,35 @@ After posting to Jira, post a threaded reply on the matching "RHOAI Jenkins Bot"
    - **Slack cross-references**: When thread messages link to other Slack threads or channels, follow those links using `mcp__slack__get_thread` to gather additional context (e.g., DevOps discussions, build notification threads).
    - **PR status**: When GitHub PRs are referenced, note whether they are open, merged, or closed. If a fix PR was merged, check if it was backported to the relevant branch.
    - The goal is to provide a complete, up-to-date picture of each failure — not just echo what was said in previous threads, but report the *current state* of each investigation.
+5. **Operator build notification lookup (RHOAI only)** — extract the operator SHA from `image_metadata['operator_bundle']['full_image_uri']`. Search `#rhoai-build-notifications` (channel ID `C07ANR2U56C`) via `mcp__slack__search_channel_messages` for the SHA digest. If found, store the message permalink as `rhoai_build_notification_url` in the analysis dict. If the channel is not accessible (different Slack workspace), set the field to `None` — the Slack message will show "_not found in #rhoai-build-notifications_".
 
-#### 6b. Save MCP data and generate the Slack message
-Save the `search_results` and `thread_data` collected via MCP tools to a JSON file, then run the script to generate the message. The script automatically fetches Jira statuses for all referenced tickets and enriches the output.
+#### 6b. Write the Slack analysis message
+The Slack message is the primary communication to the team. It must be a **full analysis**, not a bare list of failures. The Jenkins Bot already posts the failure list — the agent analysis must add context, investigation, and recommendations that the team can act on.
 
-```bash
-# Save MCP data to JSON (search_results + thread_data collected in step 6a)
-# Then generate the Slack message:
-venv/bin/python scripts/post_analysis_summaries.py slack \
-    --data /tmp/slack_data.json --build 366 --platform RHOAI \
-    --total 120 --passed 112 --failed 8 \
-    --real-failures 'pipelines,testPerformanceFiltersAvailable,testSchedulePipeline,...' \
-    --flaky 'testRayJobProjectAccessPermissions,testProjectAccessPermissions,...' \
-    --ticket RHOAIENG-59395 \
-    --ticket-url https://redhat.atlassian.net/browse/RHOAIENG-59395 \
-    --cluster-pods 17:17:0 \
-    --pipeline-failure 'dashboardPostBuild:NullPointerException' \
-    --output /tmp/slack_message.json
+**Do NOT just run `post_analysis_summaries.py slack` and post the output.** That script generates a minimal summary. Instead, write the Slack message yourself using all the context gathered in step 6a plus the deep analysis findings from step 4b.
+
+The message must include:
+
+1. **Header** — disclaimer line, Jira link, overall stats (total/passed/failed/flaky), cluster health, pipeline failure
+2. **Operator and image info** — pass `image_metadata` (from tracer) to `compose_slack_message()` / `build_slack_analysis()` so the `:gear: Deployment Info` section renders automatically. It shows: operator SHA + build date + RHOAI version + build notification link (or "not found"), dashboard commit with GitHub link, FBC fragment. If the operator is stale (built days ago), call it out — fixes merged after the image build won't be present.
+3. **Failure clusters with root cause analysis** — group failures by root cause, explain WHY each cluster fails (not just the error message), link to the specific PR or config change that caused it
+4. **Related PRs** — for each failure cluster, link to PRs that caused, fix, or are related to the failures. Include PR status (merged/open), author, and whether the PR is in the deployed image.
+5. **Related Jira tickets** — link to existing bugs with their current status. If a ticket was discussed in previous threads, summarize the latest status (who's assigned, what's the latest comment, is a fix merged).
+6. **Trend analysis** — compare vs previous builds. What improved? What regressed? What's persistent? Use the historical thread data to show the trajectory (e.g., "Model serving: 8 failures in #936 → 3 in #942 → 1 in #969 → 6 in #992 (regression)")
+7. **Recovery notes** — tests that were previously failing but are now passing, and why
+8. **Historical context** — reference relevant discussions from previous build threads (who is working on what, what was decided, what's blocking)
+9. **Reclassifications** — if deep analysis revealed some "real" failures are actually flaky (passed on retry), call this out with the corrected count
+
+Use Slack formatting: `*bold*`, `_italic_`, `` `code` ``, `:emoji:`, bullet points. Link to Jira tickets, PRs, and previous thread messages where relevant.
+
+Always start the message with:
+```
+*NOTE: _This is an Agentic-AI generated message. This feature is still WIP_*
 ```
 
-The output JSON contains `{"thread_ts": "...", "message": "..."}`. Post using `mcp__slack__post_message` with the `thread_ts` and `message` values.
+Use the `post_analysis_summaries.py slack` script only as a starting point for the header/stats section if helpful, but the analysis body must be written by the agent with full context.
 
-The generated message already starts with the required disclaimer: `*NOTE: _This is an Agentic-AI generated message. This feature is still WIP_*`. Do not remove or modify this line.
+Post using `mcp__slack__post_message` with the build's `thread_ts` value.
 
 #### Slack MCP tool reference
 | Tool | Purpose |
