@@ -1474,7 +1474,18 @@ def generate_html_report(
             author = esc(m.get("author", ""))
             subject = esc(m.get("subject", "")[:100])
             sha_short = esc(m.get("sha", "")[:8])
-            merge_items.append(f"<li><strong>[{repo}]</strong> {sha_short} by {author} &mdash; {subject}</li>")
+            full_sha = m.get("full_sha", m.get("sha", ""))
+            mr_num = m.get("mr_number", "")
+            merged = m.get("merged")
+            merge_badge = '<span style="color:var(--green)">&#x2705; merged</span>' if merged else '<span style="color:var(--orange)">&#x26A0;&#xFE0F; unmerged</span>'
+            if repo == "Jenkins" and mr_num:
+                ref_link = f'<a href="https://gitlab.cee.redhat.com/ods/jenkins/-/merge_requests/{esc(str(mr_num))}">!{esc(str(mr_num))}</a>'
+            elif repo == "Dashboard" and mr_num:
+                ref_link = f'<a href="https://github.com/opendatahub-io/odh-dashboard/pull/{esc(str(mr_num))}">#{esc(str(mr_num))}</a>'
+            else:
+                ref_link = f'<code>{sha_short}</code>'
+            merge_status = f" ({merge_badge})" if merged is not None else ""
+            merge_items.append(f"<li><strong>[{repo}]</strong> {ref_link}{merge_status} by {author} &mdash; {subject}</li>")
         merges_section = f"""
         <section class="section">
           <h2>Recent Commits</h2>
@@ -2028,6 +2039,27 @@ def analyze_image_registry_type(image_uri: str) -> dict:
     return registry_info
 
 
+def _find_default_branch(repo_path: str) -> str:
+    """Detect the default branch (master or main) in a repo."""
+    for branch in ('master', 'main'):
+        r = subprocess.run(
+            ['git', 'rev-parse', '--verify', f'refs/heads/{branch}'],
+            cwd=repo_path, capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            return branch
+    return 'master'
+
+
+def _is_commit_on_branch(repo_path: str, sha: str, branch: str) -> bool:
+    """Check if a commit is reachable from a branch."""
+    r = subprocess.run(
+        ['git', 'merge-base', '--is-ancestor', sha, branch],
+        cwd=repo_path, capture_output=True, text=True, timeout=10,
+    )
+    return r.returncode == 0
+
+
 def check_recent_commits_single_repo(repo_path: str, repo_name: str, hours_back: int = 24) -> list:
     """
     Check a single git repo for recent commits.
@@ -2043,6 +2075,8 @@ def check_recent_commits_single_repo(repo_path: str, repo_name: str, hours_back:
     recent_commits = []
 
     try:
+        default_branch = _find_default_branch(repo_path)
+
         # Get ALL commits (not just merges) with full info
         result = subprocess.run(
             ['git', 'log', f'--since={hours_back} hours ago',
@@ -2069,6 +2103,8 @@ def check_recent_commits_single_repo(repo_path: str, repo_name: str, hours_back:
                     if mr_match:
                         mr_number = mr_match.group(1)
 
+                    merged = _is_commit_on_branch(repo_path, full_sha, default_branch)
+
                     # Check if commit relates to Jenkins/pipeline/tests
                     # For Jenkins repo: ALL commits are pipeline-related by definition
                     # For Dashboard repo: check for specific keywords
@@ -2091,7 +2127,8 @@ def check_recent_commits_single_repo(repo_path: str, repo_name: str, hours_back:
                         'body': body[:200] if body else '',  # First 200 chars of body
                         'mr_number': mr_number,
                         'is_pipeline_related': is_pipeline_related,
-                        'repository': repo_name  # Track which repo this commit is from
+                        'repository': repo_name,
+                        'merged': merged,
                     }
 
                     recent_commits.append(commit_info)
@@ -2564,16 +2601,20 @@ async def main():
         dashboard_commits = [m for m in recent_merges if m['repository'] == 'Dashboard']
 
         if jenkins_commits:
-            print(f"      Found {len(jenkins_commits)} Jenkins config change(s) (can break pipeline)")
-            for commit in jenkins_commits[:3]:  # Show top 3
+            merged_j = [c for c in jenkins_commits if c.get('merged')]
+            print(f"      Found {len(jenkins_commits)} Jenkins config change(s) ({len(merged_j)} merged, {len(jenkins_commits)-len(merged_j)} unmerged)")
+            for commit in jenkins_commits[:3]:
                 mr_display = f"!{commit['mr_number']}" if commit['mr_number'] else commit['sha']
-                print(f"         🚨 {mr_display}: {commit['subject'][:60]}...")
-        
+                status = "✅" if commit.get('merged') else "⚠️ unmerged"
+                print(f"         🚨 {mr_display} ({status}): {commit['subject'][:60]}...")
+
         if dashboard_commits:
-            print(f"      Found {len(dashboard_commits)} Dashboard change(s) (can break E2E tests only)")
-            for commit in dashboard_commits[:2]:  # Show top 2
+            merged_d = [c for c in dashboard_commits if c.get('merged')]
+            print(f"      Found {len(dashboard_commits)} Dashboard change(s) ({len(merged_d)} merged, {len(dashboard_commits)-len(merged_d)} unmerged)")
+            for commit in dashboard_commits[:2]:
                 mr_display = f"#{commit['mr_number']}" if commit['mr_number'] else commit['sha']
-                print(f"         📊 {mr_display}: {commit['subject'][:60]}...")
+                status = "✅" if commit.get('merged') else "⚠️ unmerged"
+                print(f"         📊 {mr_display} ({status}): {commit['subject'][:60]}...")
         else:
             print(f"      No merges in last 24 hours")
     elif pipeline_failure.get('is_post_test_failure'):
@@ -3410,6 +3451,8 @@ async def main():
             dashboard_commits = [m for m in recent_merges if m['repository'] == 'Dashboard']
 
             if jenkins_commits:
+                merged_j = [c for c in jenkins_commits if c.get('merged')]
+                unmerged_j = [c for c in jenkins_commits if not c.get('merged')]
                 lines.append(f"**🚨 GitLab Jenkins Changes ({len(jenkins_commits)}) - Can Break Pipeline:**")
                 lines.append("")
                 lines.append("These Jenkins configuration changes may have caused the pipeline failure:")
@@ -3419,12 +3462,16 @@ async def main():
                         mr_link = f"[!{commit['mr_number']}](https://gitlab.cee.redhat.com/ods/jenkins/-/merge_requests/{commit['mr_number']})"
                     else:
                         mr_link = f"[{commit['sha']}](https://gitlab.cee.redhat.com/ods/jenkins/-/commit/{commit['full_sha']})"
-                    
-                    lines.append(f"- **{mr_link}** by {commit['author']}")
+
+                    merge_badge = "✅ merged" if commit.get('merged') else "⚠️ unmerged"
+                    lines.append(f"- **{mr_link}** ({merge_badge}) by {commit['author']}")
                     lines.append(f"  - {commit['subject']}")
                     lines.append(f"  - Committed: {commit['timestamp']}")
                     if commit['body']:
                         lines.append(f"  - Details: {commit['body'][:100]}...")
+                    lines.append("")
+                if unmerged_j:
+                    lines.append(f"> ⚠️ **{len(unmerged_j)}** commit(s) are NOT merged to master and did NOT affect this build.")
                     lines.append("")
 
             if dashboard_commits:
@@ -3432,15 +3479,16 @@ async def main():
                 lines.append("")
                 lines.append("These Dashboard changes do NOT cause pipeline failures, only E2E test failures:")
                 lines.append("")
-                
+
                 for commit in dashboard_commits[:5]:  # Limit to 5 for brevity
                     if commit['mr_number']:
                         pr_link = f"[#{commit['mr_number']}](https://github.com/opendatahub-io/odh-dashboard/pull/{commit['mr_number']})"
                     else:
                         pr_link = f"[{commit['sha']}](https://github.com/opendatahub-io/odh-dashboard/commit/{commit['full_sha']})"
-                    
-                    lines.append(f"- **{pr_link}** by {commit['author']}: {commit['subject'][:80]}")
-                
+
+                    merge_badge = "✅" if commit.get('merged') else "⚠️ unmerged"
+                    lines.append(f"- **{pr_link}** ({merge_badge}) by {commit['author']}: {commit['subject'][:80]}")
+
                 if len(dashboard_commits) > 5:
                     lines.append(f"- ... and {len(dashboard_commits) - 5} more Dashboard commit(s)")
                 lines.append("")

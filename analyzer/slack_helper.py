@@ -534,10 +534,25 @@ def compose_slack_message(
         if dash_meta:
             commit = (dash_meta.get("commit_sha_full") or "")[:12]
             url = dash_meta.get("commit_url", "")
+            age_str = ""
+            if dash_meta.get("build_date"):
+                try:
+                    bd = datetime.fromisoformat(dash_meta["build_date"].replace("Z", "+00:00"))
+                    delta = datetime.now(tz=timezone.utc) - bd
+                    hours = int(delta.total_seconds() // 3600)
+                    if hours < 1:
+                        age_str = " | _from < 1 hour ago_"
+                    elif hours < 24:
+                        age_str = f" | _from {hours} hour{'s' if hours != 1 else ''} ago_"
+                    else:
+                        days = hours // 24
+                        age_str = f" | _from {days} day{'s' if days != 1 else ''} ago_"
+                except (ValueError, TypeError):
+                    pass
             if commit and url:
-                deploy_lines.append(f"• *Dashboard:* commit <{url}|`{commit}`>")
+                deploy_lines.append(f"• *Dashboard:* commit <{url}|`{commit}`>{age_str}")
             elif commit:
-                deploy_lines.append(f"• *Dashboard:* commit `{commit}`")
+                deploy_lines.append(f"• *Dashboard:* commit `{commit}`{age_str}")
 
         fbc_meta = image_metadata.get("fbc_fragment", {})
         if fbc_meta and fbc_meta.get("full_image_uri"):
