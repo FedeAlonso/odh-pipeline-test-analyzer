@@ -6,11 +6,21 @@ Automated analysis tool for RHOAI/ODH Cypress E2E nightly test builds from Jenki
 
 ```bash
 # Run analysis
-venv/bin/python scripts/comprehensive_analysis.py <build_number|latest> [odh|rhoai] [--enable-trend] [--no-artifacts-download]
+venv/bin/python scripts/comprehensive_analysis.py <build_number|latest> [odh|rhoai] [options]
+
+# Options:
+#   -y, --yes                Auto-accept prompts (also auto-detected when stdin is not a TTY)
+#   --skip-rerun               Skip test reruns
+#   --skip-slack               Skip Slack message posting
+#   --skip-jira              Skip Jira lock ticket and result publishing
+#   --no-artifacts-download  Skip downloading screenshots/videos from Jenkins
+#   --enable-trend           Enable trend analysis (for nightly automation)
 
 # Examples
 venv/bin/python scripts/comprehensive_analysis.py latest rhoai
 venv/bin/python scripts/comprehensive_analysis.py 3695 odh
+venv/bin/python scripts/comprehensive_analysis.py 492 rhoai --skip-rerun --skip-jira
+venv/bin/python scripts/comprehensive_analysis.py latest rhoai -y   # non-interactive
 
 # Install dependencies
 venv/bin/pip install -r requirements.txt
@@ -44,6 +54,7 @@ There is no test suite. Verify changes by running the analyzer against a real bu
 - **Jenkins** — `JENKINS_URL` + `JENKINS_USER`/`JENKINS_TOKEN` (Basic Auth)
 - **Jira** — `JIRA_URL` + `JIRA_USER`/`JIRA_TOKEN` (Atlassian Cloud, Basic Auth, API v3)
 - **OpenShift** — `RHOAI_API_SERVER`/`ODH_API_SERVER` + credentials (read-only `oc` CLI). Also accessible via the Kubernetes MCP server (see below).
+- **Test Variables** — `RHOAI_TEST_VARIABLES`/`ODH_TEST_VARIABLES` (absolute path to `test-variables.yml` per cluster). Falls back to `<frontend_repo>/packages/cypress/test-variables.yml` if not set.
 - **GitLab** — `GITLAB_URL` + `GITLAB_TOKEN` (commit tracking)
 - **Tracer** — `TRACER_PATH` (optional, image metadata extraction)
 - **Slack** — [redhat-community-ai-tools/slack-mcp](https://github.com/redhat-community-ai-tools/slack-mcp) MCP server. Read channel history and send analysis summaries.
@@ -82,6 +93,8 @@ Classified as `infra` (cluster setup), `test` (Cypress execution), or `post-buil
 ### Test rerun strategy
 When >5 failures, groups by exception type and reruns one per group. Otherwise reruns all. Results distinguish "passed on retry" (flaky) vs "failed on retry" (real bug).
 
+Reruns are **deterministic**: they checkout the exact downstream commit (`red-hat-data-services/odh-dashboard`) used by the nightly build, extracted from the fbc_fragment tracer metadata. The downstream repo is added as a git remote (`downstream`) in the local `odh-dashboard` checkout and fetched on demand. This ensures the test code matches what the nightly actually ran, not whatever is on `main` at analysis time. The test-variables config is read from the frontend repo at `packages/cypress/test-variables.yml`.
+
 ## Agent Workflow
 
 When asked to run a nightly analysis, follow these steps in order:
@@ -91,16 +104,14 @@ Ask the user for the build number (or use `latest`) and platform (`rhoai` or `od
 
 ### 2. Run the analysis
 ```bash
-venv/bin/python scripts/comprehensive_analysis.py <build_number|latest> <odh|rhoai>
+venv/bin/python scripts/comprehensive_analysis.py <build_number|latest> <odh|rhoai> -y
 ```
-Always download artifacts (do NOT use `--no-artifacts-download`). The HTML report embeds screenshots and videos from test failures, which are essential for debugging.
+Always use `-y` (auto-accept prompts) to avoid blocking on interactive input. Always download artifacts (do NOT use `--no-artifacts-download`). The HTML report embeds screenshots and videos from test failures, which are essential for debugging.
 The script handles:
 - **Jira lock check** — creates a lock ticket (`Nightly Analysis: {build}-{platform}-{date}`) in RHOAIENG to prevent duplicate runs. If the ticket already exists, prompts the user.
 - **11-step analysis** — fetches build data, parses test results, inspects cluster, searches Jira, reruns failing tests, downloads artifacts.
 - **Report generation** — saves markdown + HTML reports locally.
 - **Jira publish** — posts a summary comment and attaches the .md and .html reports to the lock ticket.
-
-Monitor the console output for prompts that need user input (e.g., old build warnings, variant mismatches, lock ticket conflicts).
 
 ### 3. Deliver the outputs to the user
 Once the analysis completes, three files are generated:

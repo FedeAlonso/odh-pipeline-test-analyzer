@@ -296,6 +296,17 @@ class ClusterInspector:
 
         return errors
 
+    async def get_operator_csv_version(self, namespace: str) -> Optional[str]:
+        """Get the installed RHODS/ODH operator version from ClusterServiceVersions."""
+        result = await self._run_oc_command('get', 'csv', '-n', namespace, '-o', 'json')
+        if 'error' in result:
+            return None
+        for item in result.get('items', []):
+            name = item.get('metadata', {}).get('name', '')
+            if 'rhods-operator' in name or 'opendatahub-operator' in name:
+                return item.get('spec', {}).get('version', name)
+        return None
+
     async def analyze_test_environment(self, namespace: str) -> Dict[str, Any]:
         """
         Comprehensive analysis of test environment health

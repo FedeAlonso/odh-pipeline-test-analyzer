@@ -147,6 +147,7 @@ async def check_or_create_lock(
     build_num: int,
     platform: str,
     build_date_str: str,
+    auto_yes: bool = False,
 ) -> Tuple[bool, Optional[str]]:
     if not Config.JIRA_TOKEN:
         return (True, None)
@@ -159,13 +160,16 @@ async def check_or_create_lock(
         print(f"   {existing['summary']}")
         print(f"   {existing['url']}")
         print(f"   Someone may already be running this analysis.\n")
-        try:
-            answer = input("Continue and publish to existing ticket? (y/n): ").strip().lower()
-        except EOFError:
-            answer = "y"
-        if answer != "y":
-            print("Cancelled.")
-            sys.exit(0)
+        if auto_yes or not sys.stdin.isatty():
+            print("Auto-accepting existing ticket (non-interactive mode)")
+        else:
+            try:
+                answer = input("Continue and publish to existing ticket? (y/n): ").strip().lower()
+            except EOFError:
+                answer = "y"
+            if answer != "y":
+                print("Cancelled.")
+                sys.exit(0)
         return (True, existing["key"])
 
     created = await create_lock_ticket(build_num, platform, build_date_str, project)
@@ -222,6 +226,7 @@ async def publish_results(
     failure_names: list,
     md_report_path: str,
     html_report_path: str,
+    version_mismatch: Dict[str, Any] = None,
 ) -> bool:
     """Publish analysis results to the Jira lock ticket: comment + attachments."""
     base_url = Config.JIRA_URL.rstrip('/')
@@ -243,7 +248,15 @@ async def publish_results(
             "",
             f"### Pipeline Failure",
             f"- **Failed step:** {pipeline_failure.get('failed_step', 'Unknown')}",
-            f"- **Error:** {pipeline_failure.get('exception_message', pipeline_failure.get('error_text', 'N/A'))[:200]}",
+            f"- **Error:** {(pipeline_failure.get('exception_message') or pipeline_failure.get('error_text') or 'N/A')[:200]}",
+        ])
+
+    if version_mismatch and version_mismatch.get('has_mismatch'):
+        lines.extend([
+            "",
+            f"### 🚨 Version Mismatch",
+            f"- **Expected (FBC fragment):** {version_mismatch['expected_version']}",
+            f"- **Installed (operator CSV):** {version_mismatch['installed_version']}",
         ])
 
     if failure_names:
