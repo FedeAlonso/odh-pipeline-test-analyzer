@@ -526,8 +526,22 @@ def compose_slack_message(
             sha = op_meta["full_image_uri"]
             short_sha = sha.split("@")[-1][:19] if "@" in sha else sha.split(":")[-1][:19]
             parts = [f"`{short_sha}`"]
+            op_stale = False
             if op_meta.get("build_date"):
-                parts.append(f"Built: {op_meta['build_date']}")
+                try:
+                    bd = datetime.fromisoformat(op_meta["build_date"].replace("Z", "+00:00"))
+                    delta = datetime.now(tz=timezone.utc) - bd
+                    hours = int(delta.total_seconds() // 3600)
+                    if hours < 1:
+                        parts.append("Built: < 1 hour ago")
+                    elif hours < 24:
+                        parts.append(f"Built: {hours}h ago")
+                    else:
+                        days = hours // 24
+                        op_stale = True
+                        parts.append(f":rotating_light: Built: *{days}d {hours % 24}h ago* :rotating_light:")
+                except (ValueError, TypeError):
+                    parts.append(f"Built: {op_meta['build_date']}")
             if op_meta.get("rhoai_version"):
                 parts.append(f"RHOAI {op_meta['rhoai_version']}")
             notif_url = analysis.get("rhoai_build_notification_url")
@@ -536,36 +550,63 @@ def compose_slack_message(
             elif analysis.get("platform", "").upper() == "RHOAI":
                 parts.append("_not found in #rhoai-build-notifications_")
             deploy_lines.append(f"• *Operator:* {' | '.join(parts)}")
+            if op_stale:
+                deploy_lines.append("  :warning: _Operator image is stale — fixes merged after this build won't be present_")
 
         dash_meta = image_metadata.get("dashboard", {})
         if dash_meta:
             commit = (dash_meta.get("commit_sha_full") or "")[:12]
             url = dash_meta.get("commit_url", "")
             age_str = ""
+            dash_stale = False
             if dash_meta.get("build_date"):
                 try:
                     bd = datetime.fromisoformat(dash_meta["build_date"].replace("Z", "+00:00"))
                     delta = datetime.now(tz=timezone.utc) - bd
                     hours = int(delta.total_seconds() // 3600)
                     if hours < 1:
-                        age_str = " | _from < 1 hour ago_"
+                        age_str = " | _< 1 hour ago_"
                     elif hours < 24:
-                        age_str = f" | _from {hours} hour{'s' if hours != 1 else ''} ago_"
+                        age_str = f" | _{hours}h ago_"
                     else:
                         days = hours // 24
-                        age_str = f" | _from {days} day{'s' if days != 1 else ''} ago_"
+                        dash_stale = True
+                        age_str = f" | :rotating_light: *{days}d {hours % 24}h ago* :rotating_light:"
                 except (ValueError, TypeError):
                     pass
             if commit and url:
                 deploy_lines.append(f"• *Dashboard:* commit <{url}|`{commit}`>{age_str}")
             elif commit:
                 deploy_lines.append(f"• *Dashboard:* commit `{commit}`{age_str}")
+            if dash_stale:
+                deploy_lines.append("  :warning: _Dashboard commit is stale — test code may not match latest main_")
 
         fbc_meta = image_metadata.get("fbc_fragment", {})
         if fbc_meta and fbc_meta.get("full_image_uri"):
             fbc_uri = fbc_meta["full_image_uri"]
             short = fbc_uri.split("/")[-1] if "/" in fbc_uri else fbc_uri
             deploy_lines.append(f"• *FBC Fragment:* `{short}`")
+
+        # Component commit age summary from FBC fragment
+        fbc_components = (image_metadata.get("fbc_fragment") or {}).get("component_commits", {})
+        if fbc_components:
+            dated = [c for c in fbc_components.values() if c.get('commit_date')]
+            if dated:
+                oldest = min(dated, key=lambda c: c['commit_date'])
+                try:
+                    od = datetime.fromisoformat(oldest['commit_date'].replace("Z", "+00:00"))
+                    delta = datetime.now(tz=timezone.utc) - od
+                    hours = int(delta.total_seconds() // 3600)
+                    stale_count = sum(1 for c in dated if (datetime.now(tz=timezone.utc) - datetime.fromisoformat(c['commit_date'].replace("Z", "+00:00"))).total_seconds() > 86400)
+                    # Deduplicate by repo+sha for repo count
+                    unique_repos = len(set((c.get('repo_name', ''), c.get('sha', '')) for c in fbc_components.values()))
+                    if hours >= 24:
+                        days = hours // 24
+                        deploy_lines.append(f"• *Components:* {unique_repos} repos | oldest commit: *{days}d {hours % 24}h ago* | {stale_count} stale (>24h)")
+                    else:
+                        deploy_lines.append(f"• *Components:* {unique_repos} repos | all commits within 24h")
+                except (ValueError, TypeError):
+                    pass
 
         if deploy_lines:
             lines.append(":gear: *Deployment Info*")
