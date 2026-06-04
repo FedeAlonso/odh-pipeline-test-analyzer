@@ -19,7 +19,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -89,7 +89,7 @@ def extract_all_deployed_images(console_output: str) -> dict:
 def get_image_metadata_with_tracer(image_uri: str) -> dict:
     """
     Use tracer tool to get complete image metadata.
-    Returns: build date, commit info, RHOAI version, etc.
+    Returns: build date, commit info, RHOAI version, component commits, etc.
     """
     tracer_path = os.getenv("TRACER_PATH", "/path/to/tracer/tracer.sh")
 
@@ -99,6 +99,7 @@ def get_image_metadata_with_tracer(image_uri: str) -> dict:
         'rhoai_version': None,
         'commit_sha_full': None,
         'commit_url': None,
+        'component_commits': {},
         'error': None,
         'raw_output': None
     }
@@ -112,7 +113,6 @@ def get_image_metadata_with_tracer(image_uri: str) -> dict:
         return metadata
 
     try:
-        # Run tracer with -c flag to show commit info
         result = subprocess.run(
             [tracer_path, '-i', image_uri, '-c'],
             capture_output=True,
@@ -126,15 +126,8 @@ def get_image_metadata_with_tracer(image_uri: str) -> dict:
             metadata['error'] = f"Tracer failed (exit code {result.returncode}): {result.stderr}"
             return metadata
 
-        # Parse tracer output
-        # Expected format:
-        # Image-URI              quay.io/rhoai/...
-        # Build-Date             2025-11-18T14:23:45Z
-        # RHOAI-Version          2.17
-        # odh-dashboard          https://github.com/.../tree/SHA
-
         for line in result.stdout.strip().split('\n'):
-            parts = line.split(None, 1)  # Split on first whitespace only
+            parts = line.split(None, 1)
             if len(parts) < 2:
                 continue
 
@@ -147,11 +140,21 @@ def get_image_metadata_with_tracer(image_uri: str) -> dict:
                 metadata['build_date'] = value
             elif key == 'RHOAI-Version':
                 metadata['rhoai_version'] = value
-            elif key == 'odh-dashboard' or 'dashboard' in key.lower():
-                # Format: https://github.com/opendatahub-io/odh-dashboard/tree/SHA
-                metadata['commit_url'] = value
-                if '/tree/' in value:
-                    metadata['commit_sha_full'] = value.split('/tree/')[-1]
+            elif '/tree/' in value:
+                # Component commit line: name → https://github.com/{owner}/{repo}/tree/{SHA}
+                sha = value.split('/tree/')[-1]
+                repo_match = re.match(r'https://github\.com/([^/]+)/([^/]+)/tree/', value)
+                if repo_match:
+                    metadata['component_commits'][key] = {
+                        'sha': sha,
+                        'url': value,
+                        'repo_owner': repo_match.group(1),
+                        'repo_name': repo_match.group(2),
+                        'commit_date': None,
+                    }
+                if key == 'odh-dashboard' or key == 'dashboard':
+                    metadata['commit_url'] = value
+                    metadata['commit_sha_full'] = sha
 
         return metadata
 
@@ -161,6 +164,47 @@ def get_image_metadata_with_tracer(image_uri: str) -> dict:
         metadata['error'] = f"Tracer error: {str(e)}"
 
     return metadata
+
+
+def fetch_component_commit_dates(component_commits: dict) -> dict:
+    """Fetch real git commit dates from GitHub API for all components.
+    Deduplicates by repo+SHA to minimize API calls."""
+    if not component_commits:
+        return component_commits
+
+    # Deduplicate: group by (repo_owner, repo_name, sha)
+    unique_lookups = {}
+    for name, info in component_commits.items():
+        if not info.get('sha') or not info.get('repo_owner'):
+            continue
+        lookup_key = (info['repo_owner'], info['repo_name'], info['sha'])
+        if lookup_key not in unique_lookups:
+            unique_lookups[lookup_key] = []
+        unique_lookups[lookup_key].append(name)
+
+    print(f"   Fetching commit dates for {len(unique_lookups)} unique repo+SHA pairs...")
+    dates_cache = {}
+    for (owner, repo, sha), names in unique_lookups.items():
+        try:
+            result = subprocess.run(
+                ['gh', 'api', f'repos/{owner}/{repo}/commits/{sha}',
+                 '--jq', '.commit.committer.date'],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                dates_cache[(owner, repo, sha)] = result.stdout.strip()
+        except (subprocess.TimeoutExpired, Exception):
+            pass
+
+    # Apply dates back to all components
+    for name, info in component_commits.items():
+        lookup_key = (info.get('repo_owner'), info.get('repo_name'), info.get('sha'))
+        if lookup_key in dates_cache:
+            info['commit_date'] = dates_cache[lookup_key]
+
+    dated = sum(1 for c in component_commits.values() if c.get('commit_date'))
+    print(f"   ✅ Got dates for {dated}/{len(component_commits)} components")
+    return component_commits
 
 
 async def inspect_cluster_image_ages(inspector, namespaces: list) -> list:
@@ -1445,6 +1489,7 @@ def generate_html_report(
         </section>"""
 
     img_rows = []
+    stale_warnings = []
     for img_type in ("fbc_fragment", "iib", "dashboard", "operator_bundle"):
         meta = image_metadata.get(img_type, {})
         if not meta:
@@ -1457,23 +1502,124 @@ def generate_html_report(
         commit = meta.get("commit_sha_full", "")[:12] if meta.get("commit_sha_full") else ""
         commit_url = meta.get("commit_url", "")
         commit_link = f'<a href="{esc(commit_url)}">{esc(commit)}</a>' if commit_url and commit else esc(commit)
+        age_html = ""
+        is_stale = False
+        if build_date and img_type in ("operator_bundle", "dashboard"):
+            try:
+                bd = datetime.fromisoformat(build_date.replace("Z", "+00:00"))
+                delta = datetime.now(tz=timezone.utc) - bd
+                hours = int(delta.total_seconds() // 3600)
+                if hours < 1:
+                    age_html = '<span style="color:#28a745">< 1h ago</span>'
+                elif hours < 24:
+                    age_html = f'<span style="color:#28a745">{hours}h ago</span>'
+                else:
+                    days = hours // 24
+                    is_stale = True
+                    age_html = f'<span style="color:#ff4444;font-weight:700">&#x1F6A8; {days}d {hours % 24}h ago &#x1F6A8;</span>'
+                    label = "Operator" if img_type == "operator_bundle" else "Dashboard"
+                    stale_warnings.append(f"{label} image is {days}d {hours % 24}h old — fixes merged after this build are not present")
+            except (ValueError, TypeError):
+                pass
+        date_cell = esc(build_date)
+        if age_html:
+            date_cell += f" ({age_html})"
+        row_style = ' style="background:rgba(255,68,68,0.08)"' if is_stale else ""
         img_rows.append(f"""
-        <tr>
+        <tr{row_style}>
           <td><strong>{esc(img_type.replace('_',' ').title())}</strong></td>
           <td class="mono">{esc(uri[:80])}{"..." if len(uri)>80 else ""}</td>
-          <td>{esc(build_date)}</td>
+          <td>{date_cell}</td>
           <td>{esc(version)}</td>
           <td>{commit_link}</td>
         </tr>""")
     images_section = ""
     if img_rows:
+        stale_banner = ""
+        if stale_warnings:
+            warnings_html = "".join(f"<li>{esc(w)}</li>" for w in stale_warnings)
+            stale_banner = f"""
+          <div style="border:2px solid #ff4444;background:rgba(255,68,68,0.08);padding:12px 16px;border-radius:8px;margin-bottom:12px;">
+            <strong style="color:#ff4444">&#x1F6A8; Stale Build Warning</strong>
+            <ul style="margin:4px 0 0 0">{warnings_html}</ul>
+          </div>"""
         images_section = f"""
         <section class="section">
-          <h2>Deployment Info</h2>
+          <h2>Deployment Info</h2>{stale_banner}
           <div class="table-wrap"><table>
             <thead><tr><th>Image</th><th>URI</th><th>Build Date</th><th>Version</th><th>Commit</th></tr></thead>
             <tbody>{"".join(img_rows)}</tbody>
           </table></div>
+        </section>"""
+
+    # Component commits table from FBC fragment
+    fbc_components = (image_metadata.get('fbc_fragment') or {}).get('component_commits', {})
+    if fbc_components:
+        # Deduplicate by repo+SHA, group component names
+        seen = {}
+        for comp_name, info in fbc_components.items():
+            key = (info.get('repo_name', ''), info.get('sha', ''))
+            if key not in seen:
+                seen[key] = {'info': info, 'names': []}
+            seen[key]['names'].append(comp_name)
+
+        # Sort by commit_date ascending (oldest first), None dates at end
+        def sort_key(item):
+            d = item[1]['info'].get('commit_date')
+            return d if d else '9999'
+        sorted_components = sorted(seen.items(), key=sort_key)
+
+        comp_rows = []
+        now = datetime.now(tz=timezone.utc)
+        for (repo_name, sha), group in sorted_components:
+            info = group['info']
+            names = group['names']
+            names_html = ", ".join(f"<code>{esc(n)}</code>" for n in sorted(names))
+            if len(names) > 3:
+                names_html = f"<code>{esc(names[0])}</code> +{len(names)-1} more"
+            repo_link = f'<a href="https://github.com/{esc(info["repo_owner"])}/{esc(repo_name)}">{esc(repo_name)}</a>' if info.get('repo_owner') else esc(repo_name)
+            commit_link = f'<a href="{esc(info["url"])}">{esc(sha[:12])}</a>' if info.get('url') else esc(sha[:12])
+            date_str = info.get('commit_date', '')
+            age_html = ""
+            row_style = ""
+            if date_str:
+                try:
+                    cd = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                    delta = now - cd
+                    hours = int(delta.total_seconds() // 3600)
+                    if hours < 1:
+                        age_html = '<span style="color:#28a745">< 1h</span>'
+                    elif hours < 24:
+                        age_html = f'<span style="color:#28a745">{hours}h</span>'
+                    else:
+                        days = hours // 24
+                        age_html = f'<span style="color:#ff4444;font-weight:700">{days}d {hours % 24}h</span>'
+                        row_style = ' style="background:rgba(255,68,68,0.05)"'
+                except (ValueError, TypeError):
+                    pass
+                date_display = esc(date_str[:19])
+            else:
+                date_display = '<span style="color:#999">unknown</span>'
+            comp_rows.append(f"""
+            <tr{row_style}>
+              <td>{names_html}</td>
+              <td>{repo_link}</td>
+              <td class="mono">{commit_link}</td>
+              <td>{date_display}</td>
+              <td>{age_html}</td>
+            </tr>""")
+
+        images_section += f"""
+        <section class="section">
+          <details>
+            <summary style="cursor:pointer;font-size:1.2em;font-weight:700;margin-bottom:8px;">
+              Operator Component Commits ({len(sorted_components)} repos)
+            </summary>
+            <div class="table-wrap"><table>
+              <thead><tr><th>Component(s)</th><th>Repo</th><th>Commit</th><th>Commit Date</th><th>Age</th></tr></thead>
+              <tbody>{"".join(comp_rows)}</tbody>
+            </table></div>
+          </details>
         </section>"""
 
     vm = version_mismatch or {}
@@ -1637,7 +1783,18 @@ def generate_html_report(
             author = esc(m.get("author", ""))
             subject = esc(m.get("subject", "")[:100])
             sha_short = esc(m.get("sha", "")[:8])
-            merge_items.append(f"<li><strong>[{repo}]</strong> {sha_short} by {author} &mdash; {subject}</li>")
+            full_sha = m.get("full_sha", m.get("sha", ""))
+            mr_num = m.get("mr_number", "")
+            merged = m.get("merged")
+            merge_badge = '<span style="color:var(--green)">&#x2705; merged</span>' if merged else '<span style="color:var(--orange)">&#x26A0;&#xFE0F; unmerged</span>'
+            if repo == "Jenkins" and mr_num:
+                ref_link = f'<a href="https://gitlab.cee.redhat.com/ods/jenkins/-/merge_requests/{esc(str(mr_num))}">!{esc(str(mr_num))}</a>'
+            elif repo == "Dashboard" and mr_num:
+                ref_link = f'<a href="https://github.com/opendatahub-io/odh-dashboard/pull/{esc(str(mr_num))}">#{esc(str(mr_num))}</a>'
+            else:
+                ref_link = f'<code>{sha_short}</code>'
+            merge_status = f" ({merge_badge})" if merged is not None else ""
+            merge_items.append(f"<li><strong>[{repo}]</strong> {ref_link}{merge_status} by {author} &mdash; {subject}</li>")
         merges_section = f"""
         <section class="section">
           <h2>Recent Commits</h2>
@@ -2224,6 +2381,27 @@ def analyze_image_registry_type(image_uri: str) -> dict:
     return registry_info
 
 
+def _find_default_branch(repo_path: str) -> str:
+    """Detect the default branch (master or main) in a repo."""
+    for branch in ('master', 'main'):
+        r = subprocess.run(
+            ['git', 'rev-parse', '--verify', f'refs/heads/{branch}'],
+            cwd=repo_path, capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            return branch
+    return 'master'
+
+
+def _is_commit_on_branch(repo_path: str, sha: str, branch: str) -> bool:
+    """Check if a commit is reachable from a branch."""
+    r = subprocess.run(
+        ['git', 'merge-base', '--is-ancestor', sha, branch],
+        cwd=repo_path, capture_output=True, text=True, timeout=10,
+    )
+    return r.returncode == 0
+
+
 def check_recent_commits_single_repo(repo_path: str, repo_name: str, hours_back: int = 24) -> list:
     """
     Check a single git repo for recent commits.
@@ -2239,6 +2417,8 @@ def check_recent_commits_single_repo(repo_path: str, repo_name: str, hours_back:
     recent_commits = []
 
     try:
+        default_branch = _find_default_branch(repo_path)
+
         # Get ALL commits (not just merges) with full info
         result = subprocess.run(
             ['git', 'log', f'--since={hours_back} hours ago',
@@ -2265,6 +2445,8 @@ def check_recent_commits_single_repo(repo_path: str, repo_name: str, hours_back:
                     if mr_match:
                         mr_number = mr_match.group(1)
 
+                    merged = _is_commit_on_branch(repo_path, full_sha, default_branch)
+
                     # Check if commit relates to Jenkins/pipeline/tests
                     # For Jenkins repo: ALL commits are pipeline-related by definition
                     # For Dashboard repo: check for specific keywords
@@ -2287,7 +2469,8 @@ def check_recent_commits_single_repo(repo_path: str, repo_name: str, hours_back:
                         'body': body[:200] if body else '',  # First 200 chars of body
                         'mr_number': mr_number,
                         'is_pipeline_related': is_pipeline_related,
-                        'repository': repo_name  # Track which repo this commit is from
+                        'repository': repo_name,
+                        'merged': merged,
                     }
 
                     recent_commits.append(commit_info)
@@ -2628,6 +2811,26 @@ async def main():
                 if metadata.get('commit_sha_full'):
                     print(f"      Commit: {metadata['commit_sha_full'][:12]}")
 
+    # Fetch real git commit dates for FBC fragment components
+    fbc_meta = image_metadata.get('fbc_fragment', {})
+    if fbc_meta and fbc_meta.get('component_commits'):
+        fetch_component_commit_dates(fbc_meta['component_commits'])
+
+    # Enrich dashboard metadata from FBC fragment when tracer fails on dashboard image
+    dash_meta = image_metadata.get('dashboard', {})
+    if dash_meta and dash_meta.get('error') and fbc_meta and not fbc_meta.get('error'):
+        fbc_components = fbc_meta.get('component_commits', {})
+        dash_component = fbc_components.get('odh-dashboard', {})
+        if dash_component:
+            dash_meta['commit_sha_full'] = dash_component['sha']
+            dash_meta['commit_url'] = dash_component['url']
+            if dash_component.get('commit_date'):
+                dash_meta['build_date'] = dash_component['commit_date']
+        if not dash_meta.get('rhoai_version') and fbc_meta.get('rhoai_version'):
+            dash_meta['rhoai_version'] = fbc_meta['rhoai_version']
+        if dash_meta.get('commit_sha_full'):
+            print(f"   ✅ Dashboard metadata enriched from FBC fragment: commit {dash_meta['commit_sha_full'][:12]}")
+
     # Fallback: extract dashboard commit from console
     dashboard_commit = extract_dashboard_commit(console_output)
 
@@ -2774,16 +2977,20 @@ async def main():
         dashboard_commits = [m for m in recent_merges if m['repository'] == 'Dashboard']
 
         if jenkins_commits:
-            print(f"      Found {len(jenkins_commits)} Jenkins config change(s) (can break pipeline)")
-            for commit in jenkins_commits[:3]:  # Show top 3
+            merged_j = [c for c in jenkins_commits if c.get('merged')]
+            print(f"      Found {len(jenkins_commits)} Jenkins config change(s) ({len(merged_j)} merged, {len(jenkins_commits)-len(merged_j)} unmerged)")
+            for commit in jenkins_commits[:3]:
                 mr_display = f"!{commit['mr_number']}" if commit['mr_number'] else commit['sha']
-                print(f"         🚨 {mr_display}: {commit['subject'][:60]}...")
-        
+                status = "✅" if commit.get('merged') else "⚠️ unmerged"
+                print(f"         🚨 {mr_display} ({status}): {commit['subject'][:60]}...")
+
         if dashboard_commits:
-            print(f"      Found {len(dashboard_commits)} Dashboard change(s) (can break E2E tests only)")
-            for commit in dashboard_commits[:2]:  # Show top 2
+            merged_d = [c for c in dashboard_commits if c.get('merged')]
+            print(f"      Found {len(dashboard_commits)} Dashboard change(s) ({len(merged_d)} merged, {len(dashboard_commits)-len(merged_d)} unmerged)")
+            for commit in dashboard_commits[:2]:
                 mr_display = f"#{commit['mr_number']}" if commit['mr_number'] else commit['sha']
-                print(f"         📊 {mr_display}: {commit['subject'][:60]}...")
+                status = "✅" if commit.get('merged') else "⚠️ unmerged"
+                print(f"         📊 {mr_display} ({status}): {commit['subject'][:60]}...")
         else:
             print(f"      No merges in last 24 hours")
     elif pipeline_failure.get('is_post_test_failure'):
@@ -3487,11 +3694,27 @@ async def main():
                 lines.append(f"```")
                 lines.append("")
 
-                # If we have metadata from tracer, include it
+                # If we have metadata from tracer (or enriched from FBC fallback), include it
                 metadata = image_metadata.get(img_type, {})
-                if metadata and not metadata.get('error'):
+                has_data = metadata and (metadata.get('build_date') or metadata.get('commit_sha_full'))
+                if has_data:
                     if metadata.get('build_date'):
-                        lines.append(f"- 📅 **Build Date:** `{metadata['build_date']}`")
+                        age_warning = ""
+                        if img_type in ("operator_bundle", "dashboard"):
+                            try:
+                                bd = datetime.fromisoformat(metadata['build_date'].replace("Z", "+00:00"))
+                                delta = datetime.now(tz=timezone.utc) - bd
+                                hours = int(delta.total_seconds() // 3600)
+                                if hours < 1:
+                                    age_warning = " (< 1h ago)"
+                                elif hours < 24:
+                                    age_warning = f" ({hours}h ago)"
+                                else:
+                                    days = hours // 24
+                                    age_warning = f" 🚨 **{days}d {hours % 24}h old — STALE** 🚨"
+                            except (ValueError, TypeError):
+                                pass
+                        lines.append(f"- 📅 **Build Date:** `{metadata['build_date']}`{age_warning}")
 
                     if metadata.get('rhoai_version'):
                         lines.append(f"- 🏷️ **RHOAI Version:** `{metadata['rhoai_version']}`")
@@ -3503,10 +3726,63 @@ async def main():
                             lines.append(f"  - Full SHA: `{metadata['commit_sha_full']}`")
                         else:
                             lines.append(f"- 🔗 **Commit:** `{metadata['commit_sha_full']}`")
+
+                    if metadata.get('error'):
+                        lines.append(f"- ℹ️ _Metadata from FBC fragment (direct tracer failed)_")
                 elif metadata and metadata.get('error'):
                     lines.append(f"- ⚠️ **Tracer Error:** {metadata['error']}")
 
                 lines.append("")
+
+    # Component commits from FBC fragment
+    fbc_comp = (image_metadata.get('fbc_fragment') or {}).get('component_commits', {})
+    if fbc_comp:
+        seen_md = {}
+        for comp_name, info in fbc_comp.items():
+            key = (info.get('repo_name', ''), info.get('sha', ''))
+            if key not in seen_md:
+                seen_md[key] = {'info': info, 'names': []}
+            seen_md[key]['names'].append(comp_name)
+        def md_sort_key(item):
+            d = item[1]['info'].get('commit_date')
+            return d if d else '9999'
+        sorted_md = sorted(seen_md.items(), key=md_sort_key)
+        lines.append("### 📦 Operator Component Commits")
+        lines.append("")
+        lines.append(f"<details><summary>{len(sorted_md)} repos (sorted oldest → newest)</summary>")
+        lines.append("")
+        lines.append("| Component(s) | Repo | Commit | Commit Date | Age |")
+        lines.append("|---|---|---|---|---|")
+        now_md = datetime.now(tz=timezone.utc)
+        for (repo_name, sha), group in sorted_md:
+            info = group['info']
+            names = sorted(group['names'])
+            if len(names) > 3:
+                names_str = f"`{names[0]}` +{len(names)-1} more"
+            else:
+                names_str = ", ".join(f"`{n}`" for n in names)
+            commit_link = f"[`{sha[:12]}`]({info['url']})" if info.get('url') else f"`{sha[:12]}`"
+            date_str = info.get('commit_date', '')
+            age_str = ""
+            if date_str:
+                try:
+                    cd = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                    delta = now_md - cd
+                    hours = int(delta.total_seconds() // 3600)
+                    if hours < 24:
+                        age_str = f"{hours}h"
+                    else:
+                        days = hours // 24
+                        age_str = f"**{days}d {hours % 24}h** 🚨" if days > 0 else f"{hours}h"
+                except (ValueError, TypeError):
+                    pass
+                date_display = date_str[:19]
+            else:
+                date_display = "unknown"
+            lines.append(f"| {names_str} | {repo_name} | {commit_link} | `{date_display}` | {age_str} |")
+        lines.append("")
+        lines.append("</details>")
+        lines.append("")
 
     # Git comparison
     main_commit = None
@@ -3699,6 +3975,8 @@ async def main():
             dashboard_commits = [m for m in recent_merges if m['repository'] == 'Dashboard']
 
             if jenkins_commits:
+                merged_j = [c for c in jenkins_commits if c.get('merged')]
+                unmerged_j = [c for c in jenkins_commits if not c.get('merged')]
                 lines.append(f"**🚨 GitLab Jenkins Changes ({len(jenkins_commits)}) - Can Break Pipeline:**")
                 lines.append("")
                 lines.append("These Jenkins configuration changes may have caused the pipeline failure:")
@@ -3708,12 +3986,16 @@ async def main():
                         mr_link = f"[!{commit['mr_number']}](https://gitlab.cee.redhat.com/ods/jenkins/-/merge_requests/{commit['mr_number']})"
                     else:
                         mr_link = f"[{commit['sha']}](https://gitlab.cee.redhat.com/ods/jenkins/-/commit/{commit['full_sha']})"
-                    
-                    lines.append(f"- **{mr_link}** by {commit['author']}")
+
+                    merge_badge = "✅ merged" if commit.get('merged') else "⚠️ unmerged"
+                    lines.append(f"- **{mr_link}** ({merge_badge}) by {commit['author']}")
                     lines.append(f"  - {commit['subject']}")
                     lines.append(f"  - Committed: {commit['timestamp']}")
                     if commit['body']:
                         lines.append(f"  - Details: {commit['body'][:100]}...")
+                    lines.append("")
+                if unmerged_j:
+                    lines.append(f"> ⚠️ **{len(unmerged_j)}** commit(s) are NOT merged to master and did NOT affect this build.")
                     lines.append("")
 
             if dashboard_commits:
@@ -3721,15 +4003,16 @@ async def main():
                 lines.append("")
                 lines.append("These Dashboard changes do NOT cause pipeline failures, only E2E test failures:")
                 lines.append("")
-                
+
                 for commit in dashboard_commits[:5]:  # Limit to 5 for brevity
                     if commit['mr_number']:
                         pr_link = f"[#{commit['mr_number']}](https://github.com/opendatahub-io/odh-dashboard/pull/{commit['mr_number']})"
                     else:
                         pr_link = f"[{commit['sha']}](https://github.com/opendatahub-io/odh-dashboard/commit/{commit['full_sha']})"
-                    
-                    lines.append(f"- **{pr_link}** by {commit['author']}: {commit['subject'][:80]}")
-                
+
+                    merge_badge = "✅" if commit.get('merged') else "⚠️ unmerged"
+                    lines.append(f"- **{pr_link}** ({merge_badge}) by {commit['author']}: {commit['subject'][:80]}")
+
                 if len(dashboard_commits) > 5:
                     lines.append(f"- ... and {len(dashboard_commits) - 5} more Dashboard commit(s)")
                 lines.append("")
