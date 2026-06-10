@@ -207,6 +207,50 @@ def fetch_component_commit_dates(component_commits: dict) -> dict:
     return component_commits
 
 
+def resolve_upstream_dashboard_commit(downstream_sha: str,
+                                      downstream_repo_owner: str = "red-hat-data-services") -> dict | None:
+    """Resolve the upstream opendatahub-io/odh-dashboard commit from a downstream merge commit.
+    Returns {'upstream': {'sha', 'date', 'url'}, 'downstream_date': str} or None."""
+    try:
+        result = subprocess.run(
+            ['gh', 'api', f'repos/{downstream_repo_owner}/odh-dashboard/commits/{downstream_sha}',
+             '--jq', '[.commit.message, .commit.author.date, (.parents | map(.sha) | join(","))] | join("|||")'],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+
+        parts = result.stdout.strip().split("|||")
+        if len(parts) != 3:
+            return None
+
+        message, downstream_date, parents_str = parts
+        parents = [p.strip() for p in parents_str.split(",") if p.strip()]
+
+        if len(parents) < 2 or "merge" not in message.lower():
+            return None
+
+        upstream_sha = parents[1]
+
+        result2 = subprocess.run(
+            ['gh', 'api', f'repos/opendatahub-io/odh-dashboard/commits/{upstream_sha}',
+             '--jq', '.commit.author.date'],
+            capture_output=True, text=True, timeout=15
+        )
+        upstream_date = result2.stdout.strip() if result2.returncode == 0 else None
+
+        return {
+            'upstream': {
+                'sha': upstream_sha,
+                'date': upstream_date,
+                'url': f'https://github.com/opendatahub-io/odh-dashboard/tree/{upstream_sha}',
+            },
+            'downstream_date': downstream_date,
+        }
+    except (subprocess.TimeoutExpired, Exception):
+        return None
+
+
 async def inspect_cluster_image_ages(inspector, namespaces: list) -> list:
     """Get build dates for all unique images deployed on the cluster via skopeo."""
     seen_images = {}
@@ -841,7 +885,12 @@ async def get_test_failure_screenshots(jenkins_cli, job_path: str, build_num: in
 
 
 def extract_dashboard_commit(console_output: str) -> dict:
-    """Extract dashboard commit info from Jenkins console (legacy fallback)"""
+    """Extract dashboard commit info from Jenkins console.
+
+    The Jenkins pipeline reads the commit from the deployed pod's buildinfo labels
+    (cat /root/buildinfo/labels.json | grep commit). This is the actual code baked
+    into the running dashboard image, which may differ from the FBC fragment commit.
+    """
     commit_info = {
         'commit_hash': None,
         'commit_date': None,
@@ -851,15 +900,23 @@ def extract_dashboard_commit(console_output: str) -> dict:
     if not console_output:
         return commit_info
 
-    # Look for git commit patterns
     for line in console_output.split('\n'):
-        # Pattern: "Dashboard commit: abc123def"
-        if 'dashboard' in line.lower() and ('commit' in line.lower() or 'sha' in line.lower()):
-            match = re.search(r'([a-f0-9]{7,40})', line)
+        # Primary: "Dashboard commit hash: <40-char SHA>"
+        if 'dashboard commit hash' in line.lower():
+            match = re.search(r'([a-f0-9]{40})', line)
             if match:
-                commit_info['commit_hash'] = match.group(1)[:8]
+                commit_info['commit_hash'] = match.group(1)
+                continue
 
-        # Pattern: "Branch: main" or "ref: refs/heads/main"
+        # Fallback: any line with dashboard + commit/sha
+        if not commit_info['commit_hash']:
+            if 'dashboard' in line.lower() and ('commit' in line.lower() or 'sha' in line.lower()):
+                match = re.search(r'([a-f0-9]{40})', line)
+                if not match:
+                    match = re.search(r'([a-f0-9]{7,40})', line)
+                if match:
+                    commit_info['commit_hash'] = match.group(1)
+
         if 'branch' in line.lower() or 'ref' in line.lower():
             if 'main' in line.lower():
                 commit_info['branch'] = 'main'
@@ -1336,12 +1393,15 @@ def generate_html_report(
     num_analyses = len(analysis_with_reruns.get("failure_analyses", []))
     has_pipeline_fail = pipeline_failure.get("is_deployment_failure", False)
 
+    all_retry_passed = failures and all(getattr(f, "_is_retry_pass", False) for f in failures)
     if has_pipeline_fail and total == 0:
         status_label, status_cls = "PIPELINE FAILURE", "badge-fail"
     elif timed_out_stages:
         status_label, status_cls = "TIMEOUT", "badge-timeout"
-    elif failed > 0 or num_analyses > 0:
+    elif (failed > 0 or num_analyses > 0) and not all_retry_passed:
         status_label, status_cls = "FAILED", "badge-fail"
+    elif all_retry_passed:
+        status_label, status_cls = "PASSED (FLAKY)", "badge-pass"
     else:
         status_label, status_cls = "PASSED", "badge-pass"
 
@@ -1490,7 +1550,14 @@ def generate_html_report(
 
     img_rows = []
     stale_warnings = []
-    for img_type in ("fbc_fragment", "iib", "dashboard", "operator_bundle"):
+    img_type_labels = {
+        'fbc_fragment': 'FBC Fragment',
+        'iib': 'IIB',
+        'dashboard': 'Dashboard',
+        'operator_bundle': 'Operator Bundle',
+        'operator_deployment': 'Operator Image',
+    }
+    for img_type in ("fbc_fragment", "iib", "dashboard", "operator_bundle", "operator_deployment"):
         meta = image_metadata.get(img_type, {})
         if not meta:
             continue
@@ -1517,7 +1584,7 @@ def generate_html_report(
                     days = hours // 24
                     is_stale = True
                     age_html = f'<span style="color:#ff4444;font-weight:700">&#x1F6A8; {days}d {hours % 24}h ago &#x1F6A8;</span>'
-                    label = "Operator" if img_type == "operator_bundle" else "Dashboard"
+                    label = img_type_labels.get(img_type, img_type)
                     stale_warnings.append(f"{label} image is {days}d {hours % 24}h old — fixes merged after this build are not present")
             except (ValueError, TypeError):
                 pass
@@ -1525,10 +1592,11 @@ def generate_html_report(
         if age_html:
             date_cell += f" ({age_html})"
         row_style = ' style="background:rgba(255,68,68,0.08)"' if is_stale else ""
+        label = img_type_labels.get(img_type, img_type.replace('_', ' ').title())
         img_rows.append(f"""
         <tr{row_style}>
-          <td><strong>{esc(img_type.replace('_',' ').title())}</strong></td>
-          <td class="mono">{esc(uri[:80])}{"..." if len(uri)>80 else ""}</td>
+          <td><strong>{esc(label)}</strong></td>
+          <td class="mono" style="word-break:break-all;max-width:600px">{esc(uri)}</td>
           <td>{date_cell}</td>
           <td>{esc(version)}</td>
           <td>{commit_link}</td>
@@ -1549,6 +1617,99 @@ def generate_html_report(
           <div class="table-wrap"><table>
             <thead><tr><th>Image</th><th>URI</th><th>Build Date</th><th>Version</th><th>Commit</th></tr></thead>
             <tbody>{"".join(img_rows)}</tbody>
+          </table></div>
+        </section>"""
+
+    # Dashboard commits section (works for both RHOAI and ODH)
+    dash_commits_section = ""
+    dash_meta = image_metadata.get("dashboard", {})
+    if dash_meta and (dash_meta.get("upstream_commit") or dash_meta.get("deployed_commit_sha") or dash_meta.get("commit_sha_full")):
+        now_utc = datetime.now(tz=timezone.utc)
+
+        def _commit_age_html(date_str, stale_alarm=False):
+            if not date_str:
+                return "", ""
+            try:
+                dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                delta = now_utc - dt
+                hours = int(delta.total_seconds() // 3600)
+                if hours < 1:
+                    age = '<span style="color:#28a745">< 1h ago</span>'
+                elif hours < 24:
+                    age = f'<span style="color:#28a745">{hours}h ago</span>'
+                else:
+                    days = hours // 24
+                    if stale_alarm:
+                        age = f'<span style="color:#ff4444;font-weight:700">&#x1F6A8; {days}d {hours % 24}h ago &#x1F6A8;</span>'
+                    else:
+                        age = f'<span style="color:#666">{days}d {hours % 24}h ago</span>'
+                return esc(date_str[:19]), age
+            except (ValueError, TypeError):
+                return esc(date_str[:19]), ""
+
+        deployed_sha = dash_meta.get("deployed_commit_sha") or dash_meta.get("commit_sha_full", "")
+        upstream = dash_meta.get("upstream_commit")
+
+        if upstream:
+            # RHOAI: show downstream + upstream
+            ds_sha = deployed_sha[:12]
+            ds_url = f"https://github.com/red-hat-data-services/odh-dashboard/tree/{deployed_sha}" if deployed_sha else ""
+            ds_link = f'<a href="{esc(ds_url)}">{esc(ds_sha)}</a>' if ds_url and ds_sha else esc(ds_sha)
+            ds_date_str = dash_meta.get("downstream_commit_date", "")
+            ds_date_display, ds_age = _commit_age_html(ds_date_str, stale_alarm=True)
+
+            up_sha = upstream.get("sha", "")[:12]
+            up_url = upstream.get("url", "")
+            up_link = f'<a href="{esc(up_url)}">{esc(up_sha)}</a>' if up_url and up_sha else esc(up_sha)
+            up_date_str = upstream.get("date", "")
+            up_date_display, up_age = _commit_age_html(up_date_str, stale_alarm=False)
+
+            dash_commits_section = f"""
+        <section class="section">
+          <h2>Dashboard Commits</h2>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Source</th><th>Repository</th><th>Commit</th><th>Date</th><th>Age</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><strong>Downstream</strong></td>
+                <td class="mono">red-hat-data-services/odh-dashboard</td>
+                <td class="mono">{ds_link}</td>
+                <td>{ds_date_display}</td>
+                <td>{ds_age}</td>
+              </tr>
+              <tr>
+                <td><strong>Upstream</strong></td>
+                <td class="mono">opendatahub-io/odh-dashboard</td>
+                <td class="mono">{up_link}</td>
+                <td>{up_date_display}</td>
+                <td>{up_age}</td>
+              </tr>
+            </tbody>
+          </table></div>
+        </section>"""
+        else:
+            # ODH: single commit row
+            commit_sha = deployed_sha[:12]
+            commit_url = dash_meta.get("commit_url", "")
+            if not commit_url and deployed_sha:
+                commit_url = f"https://github.com/opendatahub-io/odh-dashboard/tree/{deployed_sha}"
+            commit_link = f'<a href="{esc(commit_url)}">{esc(commit_sha)}</a>' if commit_url and commit_sha else esc(commit_sha)
+            build_date = dash_meta.get("build_date", "")
+            date_display, age_html = _commit_age_html(build_date, stale_alarm=True)
+
+            dash_commits_section = f"""
+        <section class="section">
+          <h2>Dashboard Commit</h2>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Repository</th><th>Commit</th><th>Date</th><th>Age</th></tr></thead>
+            <tbody>
+              <tr>
+                <td class="mono">opendatahub-io/odh-dashboard</td>
+                <td class="mono">{commit_link}</td>
+                <td>{date_display}</td>
+                <td>{age_html}</td>
+              </tr>
+            </tbody>
           </table></div>
         </section>"""
 
@@ -1948,7 +2109,7 @@ th {{ background:var(--bg2); color:var(--text2); font-weight:600; text-transform
   <div class="summary-row">
     <div class="summary-card"><div class="summary-value">{total}</div><div class="summary-label">Total Tests</div></div>
     <div class="summary-card card-pass-bg"><div class="summary-value">{passed}</div><div class="summary-label">Passed</div></div>
-    <div class="summary-card card-fail-bg"><div class="summary-value">{failed}</div><div class="summary-label">Failed</div></div>
+    <div class="summary-card {"card-fail-bg" if not all_retry_passed else ""}"><div class="summary-value">{failed}</div><div class="summary-label">Failed</div></div>
     <div class="summary-card"><div class="summary-value">{pass_rate}%</div><div class="summary-label">Pass Rate</div></div>
   </div>
   <section class="section">
@@ -1985,6 +2146,7 @@ th {{ background:var(--bg2); color:var(--text2); font-weight:600; text-transform
   </section>
   {pipeline_section}
   {images_section}
+  {dash_commits_section}
   {failures_section}
   {cluster_section}
   {merges_section}
@@ -2831,8 +2993,51 @@ async def main():
         if dash_meta.get('commit_sha_full'):
             print(f"   ✅ Dashboard metadata enriched from FBC fragment: commit {dash_meta['commit_sha_full'][:12]}")
 
-    # Fallback: extract dashboard commit from console
+    # Extract deployed dashboard commit from Jenkins console (the actual code in the pod)
     dashboard_commit = extract_dashboard_commit(console_output)
+
+    # Ensure dashboard entry exists in image_metadata from console commit
+    # For ODH builds (no tracer/FBC), this is the only source of dashboard commit info.
+    if dashboard_commit.get('commit_hash') and len(dashboard_commit['commit_hash']) >= 12:
+        console_sha = dashboard_commit['commit_hash']
+        if not dash_meta:
+            dash_meta = {}
+            image_metadata['dashboard'] = dash_meta
+        if not dash_meta.get('deployed_commit_sha'):
+            dash_meta['deployed_commit_sha'] = console_sha
+        if not dash_meta.get('commit_sha_full'):
+            dash_meta['commit_sha_full'] = console_sha
+        repo_owner = "red-hat-data-services" if variant == 'RHOAI' else "opendatahub-io"
+        if not dash_meta.get('commit_url'):
+            dash_meta['commit_url'] = f"https://github.com/{repo_owner}/odh-dashboard/tree/{console_sha}"
+        if not dash_meta.get('build_date'):
+            try:
+                result = subprocess.run(
+                    ['gh', 'api', f'repos/{repo_owner}/odh-dashboard/commits/{console_sha}',
+                     '--jq', '.commit.author.date'],
+                    capture_output=True, text=True, timeout=15
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    dash_meta['build_date'] = result.stdout.strip()
+            except (subprocess.TimeoutExpired, Exception):
+                pass
+        print(f"   📌 Dashboard commit from deployed pod: {console_sha[:12]}")
+
+    # Resolve upstream commit for RHOAI builds
+    # Use the console commit (deployed pod) as the downstream reference, not the FBC fragment.
+    # The FBC fragment commit reflects when the bundle was rebuilt (often newer than the actual
+    # dashboard image), while the console commit is what the tests actually ran against.
+    if variant == 'RHOAI' and dash_meta:
+        downstream_sha = dash_meta.get('deployed_commit_sha') or dash_meta.get('commit_sha_full')
+        if downstream_sha:
+            upstream_info = resolve_upstream_dashboard_commit(downstream_sha)
+            if upstream_info:
+                dash_meta['deployed_commit_sha'] = downstream_sha
+                dash_meta['upstream_commit'] = upstream_info['upstream']
+                dash_meta['downstream_commit_date'] = upstream_info['downstream_date']
+                up = upstream_info['upstream']
+                print(f"   ✅ Upstream commit: {up['sha'][:12]} ({up.get('date', 'unknown')})")
+                print(f"      Downstream date: {upstream_info['downstream_date']}")
 
     # Step 3b: Detect dashboard commit sync issues (CRITICAL!)
     print(f"\n[3b/11] 🔄 Checking test/code synchronization...")
@@ -3023,13 +3228,20 @@ async def main():
     if cluster_analysis and inspector.logged_in:
         try:
             operator_ns = "redhat-ods-operator" if name == "RHOAI" else "openshift-operators"
-            installed_csv_version = await inspector.get_operator_csv_version(operator_ns)
-            if installed_csv_version:
+            csv_info = await inspector.get_operator_csv_info(operator_ns)
+            if csv_info:
+                installed_csv_version = csv_info['version']
                 version_mismatch = detect_version_mismatch(expected_version, installed_csv_version)
                 if version_mismatch['has_mismatch']:
                     print(f"   🚨 VERSION MISMATCH: {version_mismatch['message']}")
                 else:
                     print(f"   ✅ Operator version matches: {installed_csv_version}")
+                if csv_info.get('image'):
+                    image_metadata['operator_deployment'] = {
+                        'full_image_uri': csv_info['image'],
+                        'csv_name': csv_info['csv_name'],
+                    }
+                    print(f"   ✅ Operator image: {csv_info['image'][:80]}...")
             else:
                 print(f"   ⚠️  Could not determine installed operator version")
         except Exception as e:
@@ -3719,13 +3931,26 @@ async def main():
                     if metadata.get('rhoai_version'):
                         lines.append(f"- 🏷️ **RHOAI Version:** `{metadata['rhoai_version']}`")
 
-                    if metadata.get('commit_sha_full'):
-                        commit_short = metadata['commit_sha_full'][:8]
-                        if metadata.get('commit_url'):
-                            lines.append(f"- 🔗 **Commit:** [`{commit_short}`]({metadata['commit_url']})")
-                            lines.append(f"  - Full SHA: `{metadata['commit_sha_full']}`")
+                    deployed_sha = metadata.get('deployed_commit_sha') or metadata.get('commit_sha_full')
+                    if deployed_sha:
+                        commit_short = deployed_sha[:8]
+                        deployed_url = f"https://github.com/red-hat-data-services/odh-dashboard/tree/{deployed_sha}"
+                        upstream = metadata.get('upstream_commit')
+                        if upstream:
+                            lines.append(f"- 🔗 **Downstream Commit:** [`{commit_short}`]({deployed_url})")
+                            lines.append(f"  - Full SHA: `{deployed_sha}`")
+                            if metadata.get('downstream_commit_date'):
+                                lines.append(f"  - Date: `{metadata['downstream_commit_date']}`")
+                            up_short = upstream['sha'][:8]
+                            if upstream.get('url'):
+                                lines.append(f"- 🔗 **Upstream Commit:** [`{up_short}`]({upstream['url']})")
+                            else:
+                                lines.append(f"- 🔗 **Upstream Commit:** `{up_short}`")
+                            if upstream.get('date'):
+                                lines.append(f"  - Date: `{upstream['date']}`")
                         else:
-                            lines.append(f"- 🔗 **Commit:** `{metadata['commit_sha_full']}`")
+                            lines.append(f"- 🔗 **Commit:** [`{commit_short}`]({deployed_url})")
+                            lines.append(f"  - Full SHA: `{deployed_sha}`")
 
                     if metadata.get('error'):
                         lines.append(f"- ℹ️ _Metadata from FBC fragment (direct tracer failed)_")
@@ -3733,6 +3958,19 @@ async def main():
                     lines.append(f"- ⚠️ **Tracer Error:** {metadata['error']}")
 
                 lines.append("")
+
+    # Operator deployment image (from cluster CSV, not console log)
+    op_deploy = image_metadata.get('operator_deployment', {})
+    if op_deploy and op_deploy.get('full_image_uri'):
+        lines.append(f"### Operator Image")
+        lines.append("")
+        lines.append(f"**Image URI:**")
+        lines.append(f"```")
+        lines.append(f"{op_deploy['full_image_uri']}")
+        lines.append(f"```")
+        if op_deploy.get('csv_name'):
+            lines.append(f"- 🏷️ **CSV:** `{op_deploy['csv_name']}`")
+        lines.append("")
 
     # Component commits from FBC fragment
     fbc_comp = (image_metadata.get('fbc_fragment') or {}).get('component_commits', {})

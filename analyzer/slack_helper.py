@@ -555,31 +555,82 @@ def compose_slack_message(
 
         dash_meta = image_metadata.get("dashboard", {})
         if dash_meta:
-            commit = (dash_meta.get("commit_sha_full") or "")[:12]
-            url = dash_meta.get("commit_url", "")
-            age_str = ""
-            dash_stale = False
-            if dash_meta.get("build_date"):
-                try:
-                    bd = datetime.fromisoformat(dash_meta["build_date"].replace("Z", "+00:00"))
-                    delta = datetime.now(tz=timezone.utc) - bd
-                    hours = int(delta.total_seconds() // 3600)
-                    if hours < 1:
-                        age_str = " | _< 1 hour ago_"
-                    elif hours < 24:
-                        age_str = f" | _{hours}h ago_"
-                    else:
-                        days = hours // 24
-                        dash_stale = True
-                        age_str = f" | :rotating_light: *{days}d {hours % 24}h ago* :rotating_light:"
-                except (ValueError, TypeError):
-                    pass
-            if commit and url:
-                deploy_lines.append(f"• *Dashboard:* commit <{url}|`{commit}`>{age_str}")
-            elif commit:
-                deploy_lines.append(f"• *Dashboard:* commit `{commit}`{age_str}")
-            if dash_stale:
-                deploy_lines.append("  :warning: _Dashboard commit is stale — test code may not match latest main_")
+            deployed_sha = dash_meta.get("deployed_commit_sha") or dash_meta.get("commit_sha_full") or ""
+            commit = deployed_sha[:12]
+            url = f"https://github.com/red-hat-data-services/odh-dashboard/tree/{deployed_sha}" if deployed_sha else ""
+            upstream = dash_meta.get("upstream_commit")
+
+            if upstream and commit:
+                ds_age_str = ""
+                dash_stale = False
+                ds_date = dash_meta.get("downstream_commit_date")
+                if ds_date:
+                    try:
+                        bd = datetime.fromisoformat(ds_date.replace("Z", "+00:00"))
+                        delta = datetime.now(tz=timezone.utc) - bd
+                        hours = int(delta.total_seconds() // 3600)
+                        if hours < 1:
+                            ds_age_str = " | _< 1 hour ago_"
+                        elif hours < 24:
+                            ds_age_str = f" | _{hours}h ago_"
+                        else:
+                            days = hours // 24
+                            dash_stale = True
+                            ds_age_str = f" | :rotating_light: *{days}d {hours % 24}h ago* :rotating_light:"
+                    except (ValueError, TypeError):
+                        pass
+                if url:
+                    deploy_lines.append(f"• *Dashboard downstream:* commit <{url}|`{commit}`>{ds_age_str}")
+                else:
+                    deploy_lines.append(f"• *Dashboard downstream:* commit `{commit}`{ds_age_str}")
+                if dash_stale:
+                    deploy_lines.append("  :warning: _Dashboard commit is stale — test code may not match latest main_")
+
+                up_sha = upstream.get("sha", "")[:12]
+                up_url = upstream.get("url", "")
+                up_age_str = ""
+                if upstream.get("date"):
+                    try:
+                        ud = datetime.fromisoformat(upstream["date"].replace("Z", "+00:00"))
+                        delta = datetime.now(tz=timezone.utc) - ud
+                        hours = int(delta.total_seconds() // 3600)
+                        if hours < 1:
+                            up_age_str = " | _< 1 hour ago_"
+                        elif hours < 24:
+                            up_age_str = f" | _{hours}h ago_"
+                        else:
+                            days = hours // 24
+                            up_age_str = f" | _{days}d {hours % 24}h ago_"
+                    except (ValueError, TypeError):
+                        pass
+                if up_sha and up_url:
+                    deploy_lines.append(f"• *Dashboard upstream:* commit <{up_url}|`{up_sha}`>{up_age_str}")
+                elif up_sha:
+                    deploy_lines.append(f"• *Dashboard upstream:* commit `{up_sha}`{up_age_str}")
+            else:
+                age_str = ""
+                dash_stale = False
+                if dash_meta.get("build_date"):
+                    try:
+                        bd = datetime.fromisoformat(dash_meta["build_date"].replace("Z", "+00:00"))
+                        delta = datetime.now(tz=timezone.utc) - bd
+                        hours = int(delta.total_seconds() // 3600)
+                        if hours < 1:
+                            age_str = " | _< 1 hour ago_"
+                        elif hours < 24:
+                            age_str = f" | _{hours}h ago_"
+                        else:
+                            days = hours // 24
+                            dash_stale = True
+                            age_str = f" | :rotating_light: *{days}d {hours % 24}h ago* :rotating_light:"
+                    except (ValueError, TypeError):
+                        pass
+                if commit and url:
+                    deploy_lines.append(f"• *Dashboard:* commit <{url}|`{commit}`>{age_str}")
+                elif commit:
+                    deploy_lines.append(f"• *Dashboard:* commit `{commit}`{age_str}")
+                if dash_stale:
+                    deploy_lines.append("  :warning: _Dashboard commit is stale — test code may not match latest main_")
 
         fbc_meta = image_metadata.get("fbc_fragment", {})
         if fbc_meta and fbc_meta.get("full_image_uri"):

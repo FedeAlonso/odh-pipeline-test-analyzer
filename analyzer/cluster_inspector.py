@@ -296,16 +296,31 @@ class ClusterInspector:
 
         return errors
 
-    async def get_operator_csv_version(self, namespace: str) -> Optional[str]:
-        """Get the installed RHODS/ODH operator version from ClusterServiceVersions."""
+    async def get_operator_csv_info(self, namespace: str) -> Optional[Dict[str, str]]:
+        """Get operator version, container image, and CSV name from ClusterServiceVersions."""
         result = await self._run_oc_command('get', 'csv', '-n', namespace, '-o', 'json')
         if 'error' in result:
             return None
         for item in result.get('items', []):
             name = item.get('metadata', {}).get('name', '')
             if 'rhods-operator' in name or 'opendatahub-operator' in name:
-                return item.get('spec', {}).get('version', name)
+                version = item.get('spec', {}).get('version', name)
+                image = ''
+                try:
+                    deployments = item['spec']['install']['spec']['deployments']
+                    if deployments:
+                        containers = deployments[0].get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+                        if containers:
+                            image = containers[0].get('image', '')
+                except (KeyError, IndexError):
+                    pass
+                return {'version': version, 'image': image, 'csv_name': name}
         return None
+
+    async def get_operator_csv_version(self, namespace: str) -> Optional[str]:
+        """Get the installed RHODS/ODH operator version from ClusterServiceVersions."""
+        info = await self.get_operator_csv_info(namespace)
+        return info['version'] if info else None
 
     async def analyze_test_environment(self, namespace: str) -> Dict[str, Any]:
         """
