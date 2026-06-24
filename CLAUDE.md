@@ -128,6 +128,53 @@ After presenting the report:
 - Consult the architecture-context repo if component relationships are relevant to understanding a failure
 - Consult the odh-dashboard repo to look at the actual test code for any confusing failures
 
+### 4b. Deep analysis of uninvestigated failures
+After the initial analysis, check each real failure (not flaky) for existing investigation context: a known Jira bug, a prior deep analysis in a previous thread, or a clear root cause from the automated report. For any failure that **lacks** this context, automatically perform a deeper investigation:
+- Read the test source code in odh-dashboard to understand what it does and where it fails
+- Search for recent PRs that touch the relevant code paths (model serving, model registry, MLflow, etc.)
+- Check cluster state via K8s MCP tools (pod health, events, resource pressure, stuck resources)
+- Search Jira for related tickets
+- Look at screenshots/videos from the failure artifacts
+- **Check operator age and version** — how old is the deployed operator image? When was it built? Is it running an outdated version that's missing fixes? Use tracer output, CSV metadata, or `oc get csv` to determine the operator build date and version. If the operator is more than a few days old, note this — stale operator images are a common source of "fixed but still failing" issues.
+- **Search for related PRs** — use `gh search code`, `gh api repos/.../commits`, and `gh pr list` to find PRs that recently touched the relevant code paths. For each PR, note: title, author, merge date, and whether it's in the deployed image. Pay attention to PRs merged AFTER the operator image was built — those fixes won't be in this build.
+- **Search for related Jira tickets** — search RHOAIENG project for tickets mentioning the test name, the component, or the error message. For each ticket, note: key, summary, status, assignee, and any recent comments that indicate progress or a fix.
+- **Check the console log** — grep the Jenkins console output for the specific test name to find the exact error, timing, and any cluster events that correlate with the failure.
+
+**Only do this if fewer than 15 tests need deep investigation.** If 15+, post a summary and ask the user which failures to prioritize.
+
+Post results as **one Jira comment per failure cluster** on the lock ticket. Group tests that share the same root cause into a single comment (e.g., 8 model serving tests all broken by the same PR, 3 MLflow tests caused by the same DSC config issue). Each comment should be self-contained with full context.
+
+### 4c. Update reports with deep analysis findings
+After the deep analysis completes, **append the findings to the MD report** and **regenerate the HTML report**. The reports are the permanent record and must contain the complete picture — not just the automated script output.
+
+For each failure cluster, append a section to the MD report under a new `## 🔬 Deep Analysis` heading at the end, containing:
+- **Root cause** — what actually went wrong, not just the error message
+- **Related PRs** — links to PRs that caused, fixed, or are related to the failure, with their status (merged/open/closed)
+- **Related Jira tickets** — links with current status (New/In Progress/Review/Resolved)
+- **Trend** — is this persistent, new, regressed, or recovered vs previous builds?
+- **Reclassification** — if the deep analysis reveals a test is actually flaky (passed on retry) or has a different root cause than initially categorized
+- **Recommended action** — what needs to happen to fix this
+
+After updating the MD, regenerate the HTML:
+```bash
+venv/bin/python scripts/comprehensive_analysis.py --regenerate-html reports/current/{RHOAI|ODH}/latest-build-{N}.md
+```
+If `--regenerate-html` is not available, use the report_generator module directly or convert with pandoc.
+
+Then re-upload both updated files to the Jira lock ticket (delete old attachments first if needed).
+
+### 4d. Create Jira blocker bugs for critical failures
+When the analysis reveals a critical failure that blocks all tests (e.g., dashboard crash, operator deployment failure), create a Jira Bug in RHOAIENG with the following fields:
+
+| Field | Value |
+|-------|-------|
+| **Issue Type** | Bug (id: `10016`) |
+| **Priority** | Blocker (id: `10000`) |
+| **Labels** | `cypress_found_bug`, `found_in_nightly` |
+| **Activity Type** | `Tech Debt & Quality` (custom field `customfield_10464`) |
+| **Affects Version** | The current RHOAI version (e.g., `rhoai-3.5.EA2`) |
+
+The description should include: root cause, crash logs, evidence (image SHAs, debug findings), fix recommendation, and workaround.
 ### 5. Post agent analysis summary to Jira
 After analyzing the results, post a structured **agent analysis summary** as a comment on the lock ticket using `scripts/post_analysis_summaries.py jira`. Pass real failures as `name:error:jira_key` comma-separated, cluster pods as `total:running:failed`, and pipeline failure as `step:exception`. Use `--extra-notes` for key observations from the analysis.
 
