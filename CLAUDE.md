@@ -6,11 +6,21 @@ Automated analysis tool for RHOAI/ODH Cypress E2E nightly test builds from Jenki
 
 ```bash
 # Run analysis
-venv/bin/python scripts/comprehensive_analysis.py <build_number|latest> [odh|rhoai] [--enable-trend] [--no-artifacts-download]
+venv/bin/python scripts/comprehensive_analysis.py <build_number|latest> [odh|rhoai] [options]
+
+# Options:
+#   -y, --yes                Auto-accept prompts (also auto-detected when stdin is not a TTY)
+#   --skip-rerun               Skip test reruns
+#   --skip-slack               Skip Slack message posting
+#   --skip-jira              Skip Jira lock ticket and result publishing
+#   --no-artifacts-download  Skip downloading screenshots/videos from Jenkins
+#   --enable-trend           Enable trend analysis (for nightly automation)
 
 # Examples
 venv/bin/python scripts/comprehensive_analysis.py latest rhoai
 venv/bin/python scripts/comprehensive_analysis.py 3695 odh
+venv/bin/python scripts/comprehensive_analysis.py 492 rhoai --skip-rerun --skip-jira
+venv/bin/python scripts/comprehensive_analysis.py latest rhoai -y   # non-interactive
 
 # Install dependencies
 venv/bin/pip install -r requirements.txt
@@ -43,10 +53,12 @@ There is no test suite. Verify changes by running the analyzer against a real bu
 ### External Services
 - **Jenkins** — `JENKINS_URL` + `JENKINS_USER`/`JENKINS_TOKEN` (Basic Auth)
 - **Jira** — `JIRA_URL` + `JIRA_USER`/`JIRA_TOKEN` (Atlassian Cloud, Basic Auth, API v3)
-- **OpenShift** — `RHOAI_API_SERVER`/`ODH_API_SERVER` + credentials (read-only `oc` CLI)
+- **OpenShift** — `RHOAI_API_SERVER`/`ODH_API_SERVER` + credentials (read-only `oc` CLI). Also accessible via the Kubernetes MCP server (see below).
+- **Test Variables** — `RHOAI_TEST_VARIABLES`/`ODH_TEST_VARIABLES` (absolute path to `test-variables.yml` per cluster). Falls back to `<frontend_repo>/packages/cypress/test-variables.yml` if not set.
 - **GitLab** — `GITLAB_URL` + `GITLAB_TOKEN` (commit tracking)
 - **Tracer** — `TRACER_PATH` (optional, image metadata extraction)
 - **Slack** — [redhat-community-ai-tools/slack-mcp](https://github.com/redhat-community-ai-tools/slack-mcp) MCP server. Read channel history and send analysis summaries.
+- **Kubernetes/OpenShift** — [kubernetes-mcp-server](https://github.com/openshift/openshift-mcp-server) MCP server (full read-write). Provides direct access to pods, logs, events, namespaces, resource metrics, and OpenShift projects without needing `oc login`. Also supports write operations: create/update/delete resources, exec into pods, scale deployments. Uses `~/.kube/config`.
 
 ## Code Conventions
 
@@ -81,6 +93,8 @@ Classified as `infra` (cluster setup), `test` (Cypress execution), or `post-buil
 ### Test rerun strategy
 When >5 failures, groups by exception type and reruns one per group. Otherwise reruns all. Results distinguish "passed on retry" (flaky) vs "failed on retry" (real bug).
 
+Reruns are **deterministic**: they checkout the exact downstream commit (`red-hat-data-services/odh-dashboard`) used by the nightly build, extracted from the fbc_fragment tracer metadata. The downstream repo is added as a git remote (`downstream`) in the local `odh-dashboard` checkout and fetched on demand. This ensures the test code matches what the nightly actually ran, not whatever is on `main` at analysis time. The test-variables config is read from the frontend repo at `packages/cypress/test-variables.yml`.
+
 ## Agent Workflow
 
 When asked to run a nightly analysis, follow these steps in order:
@@ -90,16 +104,14 @@ Ask the user for the build number (or use `latest`) and platform (`rhoai` or `od
 
 ### 2. Run the analysis
 ```bash
-venv/bin/python scripts/comprehensive_analysis.py <build_number|latest> <odh|rhoai>
+venv/bin/python scripts/comprehensive_analysis.py <build_number|latest> <odh|rhoai> -y
 ```
-Always download artifacts (do NOT use `--no-artifacts-download`). The HTML report embeds screenshots and videos from test failures, which are essential for debugging.
+Always use `-y` (auto-accept prompts) to avoid blocking on interactive input. Always download artifacts (do NOT use `--no-artifacts-download`). The HTML report embeds screenshots and videos from test failures, which are essential for debugging.
 The script handles:
 - **Jira lock check** — creates a lock ticket (`Nightly Analysis: {build}-{platform}-{date}`) in RHOAIENG to prevent duplicate runs. If the ticket already exists, prompts the user.
 - **11-step analysis** — fetches build data, parses test results, inspects cluster, searches Jira, reruns failing tests, downloads artifacts.
 - **Report generation** — saves markdown + HTML reports locally.
 - **Jira publish** — posts a summary comment and attaches the .md and .html reports to the lock ticket.
-
-Monitor the console output for prompts that need user input (e.g., old build warnings, variant mismatches, lock ticket conflicts).
 
 ### 3. Deliver the outputs to the user
 Once the analysis completes, three files are generated:
@@ -201,28 +213,35 @@ After posting to Jira, post a threaded reply on the matching "RHOAI Jenkins Bot"
    - **Slack cross-references**: When thread messages link to other Slack threads or channels, follow those links using `mcp__slack__get_thread` to gather additional context (e.g., DevOps discussions, build notification threads).
    - **PR status**: When GitHub PRs are referenced, note whether they are open, merged, or closed. If a fix PR was merged, check if it was backported to the relevant branch.
    - The goal is to provide a complete, up-to-date picture of each failure — not just echo what was said in previous threads, but report the *current state* of each investigation.
+5. **Operator build notification lookup (RHOAI only)** — extract the operator SHA from `image_metadata['operator_bundle']['full_image_uri']`. Search `#rhoai-build-notifications` (channel ID `C07ANR2U56C`) via `mcp__slack__search_channel_messages` for the SHA digest. If found, store the message permalink as `rhoai_build_notification_url` in the analysis dict. If the channel is not accessible (different Slack workspace), set the field to `None` — the Slack message will show "_not found in #rhoai-build-notifications_".
 
-#### 6b. Save MCP data and generate the Slack message
-Save the `search_results` and `thread_data` collected via MCP tools to a JSON file, then run the script to generate the message. The script automatically fetches Jira statuses for all referenced tickets and enriches the output.
+#### 6b. Write the Slack analysis message
+The Slack message is the primary communication to the team. It must be a **full analysis**, not a bare list of failures. The Jenkins Bot already posts the failure list — the agent analysis must add context, investigation, and recommendations that the team can act on.
 
-```bash
-# Save MCP data to JSON (search_results + thread_data collected in step 6a)
-# Then generate the Slack message:
-venv/bin/python scripts/post_analysis_summaries.py slack \
-    --data /tmp/slack_data.json --build 366 --platform RHOAI \
-    --total 120 --passed 112 --failed 8 \
-    --real-failures 'pipelines,testPerformanceFiltersAvailable,testSchedulePipeline,...' \
-    --flaky 'testRayJobProjectAccessPermissions,testProjectAccessPermissions,...' \
-    --ticket RHOAIENG-59395 \
-    --ticket-url https://redhat.atlassian.net/browse/RHOAIENG-59395 \
-    --cluster-pods 17:17:0 \
-    --pipeline-failure 'dashboardPostBuild:NullPointerException' \
-    --output /tmp/slack_message.json
+**Do NOT just run `post_analysis_summaries.py slack` and post the output.** That script generates a minimal summary. Instead, write the Slack message yourself using all the context gathered in step 6a plus the deep analysis findings from step 4b.
+
+The message must include:
+
+1. **Header** — disclaimer line, Jira link, overall stats (total/passed/failed/flaky), cluster health, pipeline failure
+2. **Operator and image info** — pass `image_metadata` (from tracer) to `compose_slack_message()` / `build_slack_analysis()` so the `:gear: Deployment Info` section renders automatically. It shows: operator SHA + build date + RHOAI version + build notification link (or "not found"), dashboard commit with GitHub link, FBC fragment. If the operator is stale (built days ago), call it out — fixes merged after the image build won't be present.
+3. **Failure clusters with root cause analysis** — group failures by root cause, explain WHY each cluster fails (not just the error message), link to the specific PR or config change that caused it
+4. **Related PRs** — for each failure cluster, link to PRs that caused, fix, or are related to the failures. Include PR status (merged/open), author, and whether the PR is in the deployed image.
+5. **Related Jira tickets** — link to existing bugs with their current status. If a ticket was discussed in previous threads, summarize the latest status (who's assigned, what's the latest comment, is a fix merged).
+6. **Trend analysis** — compare vs previous builds. What improved? What regressed? What's persistent? Use the historical thread data to show the trajectory (e.g., "Model serving: 8 failures in #936 → 3 in #942 → 1 in #969 → 6 in #992 (regression)")
+7. **Recovery notes** — tests that were previously failing but are now passing, and why
+8. **Historical context** — reference relevant discussions from previous build threads (who is working on what, what was decided, what's blocking)
+9. **Reclassifications** — if deep analysis revealed some "real" failures are actually flaky (passed on retry), call this out with the corrected count
+
+Use Slack formatting: `*bold*`, `_italic_`, `` `code` ``, `:emoji:`, bullet points. Link to Jira tickets, PRs, and previous thread messages where relevant.
+
+Always start the message with:
+```
+*NOTE: _This is an Agentic-AI generated message. This feature is still WIP_*
 ```
 
-The output JSON contains `{"thread_ts": "...", "message": "..."}`. Post using `mcp__slack__post_message` with the `thread_ts` and `message` values.
+Use the `post_analysis_summaries.py slack` script only as a starting point for the header/stats section if helpful, but the analysis body must be written by the agent with full context.
 
-The generated message already starts with the required disclaimer: `*NOTE: _This is an Agentic-AI generated message. This feature is still WIP_*`. Do not remove or modify this line.
+Post using `mcp__slack__post_message` with the build's `thread_ts` value.
 
 #### Slack MCP tool reference
 | Tool | Purpose |
@@ -232,6 +251,236 @@ The generated message already starts with the required disclaimer: `*NOTE: _This
 | `mcp__slack__post_message` | Post threaded reply (use `thread_ts` param) |
 | `mcp__slack__get_channel_history` | Browse channel history with date filters |
 | `mcp__slack__send_dm` | Send DMs if needed |
+
+#### Kubernetes MCP tool reference
+See the full tool table in the [Cluster Investigation](#cluster-investigation) section. Key tools for nightly analysis:
+- `mcp__kubernetes-mcp-server__pods_list_in_namespace` — check pod health in `redhat-ods-operator` / `redhat-ods-applications`
+- `mcp__kubernetes-mcp-server__pods_log` — fetch operator/component logs
+- `mcp__kubernetes-mcp-server__events_list` — find warnings and errors
+- `mcp__kubernetes-mcp-server__resources_get` — inspect CSVs, DSCIs, DSCs, and custom resources
+
+## Cluster Investigation
+
+When asked to investigate cluster issues (stuck namespaces, operator failures, deployment problems), **prefer the Kubernetes MCP tools** over `oc` CLI for read-only operations. The MCP server connects via `~/.kube/config` and avoids the need to `oc login` each time. Fall back to `oc` CLI only when MCP tools don't cover the operation (e.g., `oc exec`, `oc patch`, custom resource queries with complex JSONPath).
+
+### Kubernetes MCP tool reference
+
+| Tool | Purpose | Replaces |
+|------|---------|----------|
+| `mcp__kubernetes-mcp-server__pods_list` | List pods across all namespaces | `oc get pods -A` |
+| `mcp__kubernetes-mcp-server__pods_list_in_namespace` | List pods in a specific namespace | `oc get pods -n <ns>` |
+| `mcp__kubernetes-mcp-server__pods_get` | Get pod details (status, containers, conditions) | `oc get pod <name> -o json` |
+| `mcp__kubernetes-mcp-server__pods_log` | Get pod logs (with container/tail/previous options) | `oc logs <pod>` |
+| `mcp__kubernetes-mcp-server__pods_top` | Pod CPU/memory metrics | `oc adm top pods` |
+| `mcp__kubernetes-mcp-server__nodes_top` | Node CPU/memory metrics | `oc adm top nodes` |
+| `mcp__kubernetes-mcp-server__nodes_log` | Node system logs (kubelet, kube-proxy) | SSH + journalctl |
+| `mcp__kubernetes-mcp-server__nodes_stats_summary` | Detailed node stats (CPU, memory, filesystem, PSI) | `oc describe node` |
+| `mcp__kubernetes-mcp-server__events_list` | Cluster events (warnings, errors) | `oc get events -A` |
+| `mcp__kubernetes-mcp-server__namespaces_list` | List namespaces | `oc get namespaces` |
+| `mcp__kubernetes-mcp-server__projects_list` | List OpenShift projects | `oc get projects` |
+| `mcp__kubernetes-mcp-server__resources_get` | Get any resource by apiVersion/kind/name | `oc get <resource> <name> -o json` |
+| `mcp__kubernetes-mcp-server__resources_list` | List any resource type with label/field selectors | `oc get <resource> -A` |
+| `mcp__kubernetes-mcp-server__resources_create_or_update` | Create or update any resource from YAML/JSON | `oc apply -f` |
+| `mcp__kubernetes-mcp-server__resources_delete` | Delete any resource | `oc delete <resource> <name>` |
+| `mcp__kubernetes-mcp-server__resources_scale` | Get or update replica count | `oc scale deployment` |
+| `mcp__kubernetes-mcp-server__pods_delete` | Delete a pod | `oc delete pod <name>` |
+| `mcp__kubernetes-mcp-server__pods_exec` | Execute commands in a pod | `oc exec <pod> -- <cmd>` |
+| `mcp__kubernetes-mcp-server__pods_run` | Run a container image as a pod | `oc run` |
+| `mcp__kubernetes-mcp-server__configuration_contexts_list` | List kubeconfig contexts | `oc config get-contexts` |
+
+Use the `context` parameter to target a specific cluster without switching contexts. Use `labelSelector` and `fieldSelector` parameters to filter results.
+
+**Write operations** (create, update, delete, scale, exec) are available but should be used with caution. Always confirm destructive operations with the user before executing.
+
+### Login to clusters
+
+Use `oc login` only when MCP tools are unavailable or when write operations are needed. The MCP server reads from `~/.kube/config` which already has contexts for all clusters after login.
+
+```bash
+# RHOAI cluster
+source .env && oc login "$RHOAI_API_SERVER" -u "$RHOAI_USERNAME" -p "$RHOAI_PASSWORD" --insecure-skip-tls-verify
+
+# ODH cluster
+source .env && oc login "$ODH_API_SERVER" -u "$ODH_USERNAME" -p "$ODH_PASSWORD" --insecure-skip-tls-verify
+```
+
+### Namespace stuck in Terminating
+
+```python
+# Via MCP tools (preferred for steps 1-3):
+# 1. Find stuck namespaces — list all projects and check for Terminating phase
+mcp__kubernetes-mcp-server__projects_list()
+
+# 2. Check conditions and finalizers on a specific namespace
+mcp__kubernetes-mcp-server__resources_get(apiVersion="v1", kind="Namespace", name="<namespace>")
+
+# 3. Find resources with stuck finalizers
+mcp__kubernetes-mcp-server__resources_list(apiVersion="apps/v1", kind="Deployment", namespace="<namespace>")
+
+# 4. Check events for clues
+mcp__kubernetes-mcp-server__events_list(namespace="<namespace>")
+```
+
+```python
+# Via MCP tools (for write operations — confirm with user first):
+# 4. Fix: delete stuck pod to force reschedule
+mcp__kubernetes-mcp-server__pods_delete(name="<pod>", namespace="<namespace>")
+
+# 4b. Or remove stuck finalizer by updating the resource
+mcp__kubernetes-mcp-server__resources_create_or_update(...)  # patch the resource with finalizers: null
+```
+
+```bash
+# Via oc CLI (fallback for patches):
+oc patch deployment <name> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge
+```
+
+### Operator health check (RHOAI/ODH)
+
+Prefer MCP tools for the read-only checks. Fall back to `oc` for operations MCP doesn't cover (exec, complex JSONPath).
+
+```python
+# Via MCP tools (preferred):
+# Check operator CSV and version
+mcp__kubernetes-mcp-server__resources_list(apiVersion="operators.coreos.com/v1alpha1", kind="ClusterServiceVersion", namespace="redhat-ods-operator")
+
+# Check operator pods
+mcp__kubernetes-mcp-server__pods_list_in_namespace(namespace="redhat-ods-operator")
+
+# Check DSCI and DSC status
+mcp__kubernetes-mcp-server__resources_list(apiVersion="dscinitialization.opendatahub.io/v1", kind="DSCInitialization")
+mcp__kubernetes-mcp-server__resources_list(apiVersion="datasciencecluster.opendatahub.io/v1", kind="DataScienceCluster")
+
+# Check operator logs
+mcp__kubernetes-mcp-server__pods_log(name="<operator-pod>", namespace="redhat-ods-operator", tail=50)
+
+# Check pods in applications namespace
+mcp__kubernetes-mcp-server__pods_list_in_namespace(namespace="redhat-ods-applications")
+
+# Check events for errors
+mcp__kubernetes-mcp-server__events_list(namespace="redhat-ods-operator")
+
+# Check any custom resource
+mcp__kubernetes-mcp-server__resources_get(apiVersion="services.platform.opendatahub.io/v1alpha1", kind="Auth", name="<name>", namespace="redhat-ods-operator")
+```
+
+```bash
+# Via oc CLI (fallback — for exec and complex queries):
+# Check operator image and verify manifest contents
+oc get csv <csv-name> -n redhat-ods-operator -o jsonpath='{.spec.install.spec.deployments[0].spec.template.spec.containers[0].image}'
+oc exec deployment/rhods-operator -n redhat-ods-operator -- ls /opt/manifests/
+```
+
+### Build failure diagnosis
+
+When a build fails (especially at infra stages like "Deploy RHOAI operator"), follow this diagnostic sequence:
+
+```bash
+# 1. Fetch build info and identify the failure stage
+source .env && curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" \
+    "$JENKINS_URL/job/components/job/dashboard/job/dashboard-e2e-tests/<build>/api/json?tree=result,description,timestamp,duration,building"
+
+# 2. Get console output and find the error
+source .env && curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" \
+    "$JENKINS_URL/job/components/job/dashboard/job/dashboard-e2e-tests/<build>/consoleText" > /tmp/console_<build>.txt
+
+# 3. Identify which cluster/product
+grep -E '(PRODUCT|CLUSTER_NAME)' /tmp/console_<build>.txt | head -3
+
+# 4. List pipeline stages
+grep -E '\{ \(' /tmp/console_<build>.txt
+
+# 5. Find the failure
+grep -B5 -A10 'FAIL\|ERROR\|failed after retrying\|skipped due to earlier' /tmp/console_<build>.txt | head -40
+
+# 6. Login to the affected cluster and check state
+source .env && oc login "$RHOAI_API_SERVER" -u "$RHOAI_USERNAME" -p "$RHOAI_PASSWORD" --insecure-skip-tls-verify
+# or for ODH:
+source .env && oc login "$ODH_API_SERVER" -u "$ODH_USERNAME" -p "$ODH_PASSWORD" --insecure-skip-tls-verify
+```
+
+### Known operator issues and fixes
+
+**Segment.io manifests missing from operator image (`/opt/manifests/segment`)**
+- Symptom: DSCI stuck in `Progressing`/`ReconcileInit`, Auth CR never created, build fails with "Auth does not exist"
+- Operator logs show: `lstat /opt/manifests/segment: no such file or directory`
+- Root cause: Operator image doesn't include segment manifests despite code expecting them (PR #3420 removed, PR #3519 re-added, but image wasn't rebuilt)
+- Fix: Create the resources manually, then restart the operator:
+```bash
+oc create configmap odh-segment-key-config --from-literal=segmentKeyEnabled="true" -n redhat-ods-applications
+oc create secret generic odh-segment-key --from-literal=segmentKey="$(echo 'S1JVaG9CSUVwV2xHdXo0c1dpeGFlMXZBWEtLR2xENUs=' | base64 -d)" -n redhat-ods-applications
+oc rollout restart deployment/rhods-operator -n redhat-ods-operator
+oc rollout status deployment/rhods-operator -n redhat-ods-operator --timeout=120s
+# Verify:
+sleep 30 && oc get dsci default-dsci -o jsonpath='{.status.conditions[?(@.type=="ReconcileComplete")].status}'
+# Should return "True"
+oc get auths.services.platform.opendatahub.io -A
+# Should show auth with READY=True
+```
+- Note: This fix is wiped every time the cleanup stage deletes `redhat-ods-applications` namespace. Must be re-applied after each cleanup until the operator image is rebuilt with the segment manifests included.
+
+**maas-controller finalizer deadlock (`maas.opendatahub.io/cleanup`)**
+- Symptom: `redhat-ods-applications` namespace stuck in `Terminating` indefinitely
+- Root cause: `LifecycleReconciler` (PR #870) adds a self-referencing finalizer to the maas-controller Deployment. When namespace is deleted, the controller pod dies before removing its own finalizer.
+- Diagnose via MCP: `mcp__kubernetes-mcp-server__resources_get(apiVersion="apps/v1", kind="Deployment", name="maas-controller", namespace="redhat-ods-applications")` — check `metadata.finalizers`
+- Fix (confirm with user first):
+```bash
+oc patch deployment maas-controller -n redhat-ods-applications -p '{"metadata":{"finalizers":null}}' --type=merge
+```
+
+### Leftover test projects
+
+Test namespaces matching `*-NNNNN` pattern are only cleaned up at the START of the next build (`cleanupCypressTestNamespaces()` in `runDashboardTestStages.groovy` line 50), not after test completion. Projects remain until the next nightly runs.
+
+```python
+# Via MCP tools (preferred):
+mcp__kubernetes-mcp-server__projects_list()
+# Then filter results for names matching *-NNNNN pattern
+```
+
+```bash
+# Via oc CLI (fallback):
+oc get projects -o name | grep -E '\-[0-9]{5,}$'
+```
+
+### GitHub investigation for operator/component issues
+
+```bash
+# Search for code references
+gh search code "<search-term>" --repo opendatahub-io/<repo> --limit 20
+
+# Find commits touching a file
+gh api "repos/opendatahub-io/<repo>/commits?path=<file-path>&per_page=10" \
+    --jq '.[] | "\(.sha[0:8]) \(.commit.author.date[0:10]) \(.commit.message | split("\n")[0])"'
+
+# Get PR details
+gh api repos/opendatahub-io/<repo>/pulls/<number> \
+    --jq '{title: .title, created: .created_at, merged: .merged_at, author: .user.login, body: .body[0:500]}'
+
+# Check if a commit is in a tag/release
+gh api "repos/opendatahub-io/<repo>/compare/<commit>...<tag>" \
+    --jq '{status: .status, ahead_by: .ahead_by}'
+
+# Get files changed in a PR
+gh api "repos/opendatahub-io/<repo>/pulls/<number>/files" --jq '.[].filename'
+```
+
+### Key repos for operator issues
+- **[opendatahub-io/opendatahub-operator](https://github.com/opendatahub-io/opendatahub-operator)** — RHOAI/ODH operator. DSCI controller, component reconcilers, monitoring, Dockerfiles.
+- **[opendatahub-io/models-as-a-service](https://github.com/opendatahub-io/models-as-a-service)** — MaaS controller (maas-controller). Tenant CRs, LifecycleReconciler, finalizers.
+
+### Jenkins shared library (GitLab)
+
+The Jenkins pipeline scripts live on GitLab (project ID 222109, `tguzik/jenkins`):
+- `dashboardPostBuild.groovy` — Post-build steps (report portal, etc.)
+- `dashboardHelper.groovy` — `cleanupCypressTestNamespaces()` at line 1116
+- `runDashboardTestStages.groovy` — Calls cleanup at line 50 during "Verify Cluster is Ready"
+
+```bash
+# Fetch a file from GitLab
+source .env && curl -s --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+    "$GITLAB_URL/api/v4/projects/222109/repository/files/<path>/raw?ref=master"
+```
 
 ## Context Repositories
 
@@ -253,3 +502,4 @@ When analyzing failures or understanding component behavior, consult these exter
 - Don't hardcode Jenkins/Jira/cluster URLs or credentials
 - Don't break the graceful degradation pattern — every external service must be optional
 - Don't add dependencies without updating `requirements.txt`
+- Don't ask the user to run commands during analysis — investigate autonomously using grep, Read, and shell tools on console logs, test source code, and external APIs

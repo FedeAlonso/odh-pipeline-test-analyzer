@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(venv/bin/python *)",
+      "Bash(python *)",
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(grep *)",
+      "Bash(find *)",
+      "Bash(ls *)",
+      "Bash(ps *)",
+      "Bash(wc *)",
+      "Bash(tail *)",
+      "Bash(head *)",
+      "Bash(cat *)",
+      "Bash(open *)",
+      "Bash(kill *)",
+      "Bash(pkill *)",
+      "Bash(sleep *)",
+      "Bash(echo *)",
+      "Bash(pgrep *)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "mcp__slack__whoami",
+      "mcp__slack__search_messages",
+      "mcp__slack__search_channel_messages",
+      "mcp__slack__get_thread",
+      "mcp__slack__get_channel_history",
+      "mcp__slack__get_channel_id_by_name",
+      "mcp__slack__post_message",
+      "mcp__slack__send_dm",
+      "mcp__slack__add_reaction",
+      "mcp__slack__list_joined_channels",
+      "mcp__slack__refresh_channel_cache"
+    ]
+  }
+}

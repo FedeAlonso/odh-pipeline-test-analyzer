@@ -12,6 +12,11 @@ import httpx
 
 from .config import Config
 
+_GIT_PR_NOT_APPLICABLE = {
+    "type": "doc", "version": 1,
+    "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Not Applicable"}]}],
+}
+
 
 def _auth():
     if Config.JIRA_USER:
@@ -82,6 +87,7 @@ async def create_lock_ticket(
             },
             "issuetype": {"name": "Task"},
             "labels": ["nightly-analysis"],
+            "customfield_10875": _GIT_PR_NOT_APPLICABLE,
         }
     }
 
@@ -101,10 +107,47 @@ async def create_lock_ticket(
         }
 
 
+async def _close_ticket(issue_key: str) -> bool:
+    base_url = Config.JIRA_URL.rstrip('/')
+    async with httpx.AsyncClient(verify=Config.SSL_VERIFY, timeout=30.0) as client:
+        await client.put(
+            f"{base_url}/rest/api/3/issue/{issue_key}",
+            headers=_headers(),
+            auth=_auth(),
+            json={"fields": {"customfield_10875": _GIT_PR_NOT_APPLICABLE}},
+        )
+
+        resp = await client.get(
+            f"{base_url}/rest/api/3/issue/{issue_key}/transitions",
+            headers=_headers(),
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        transitions = resp.json().get("transitions", [])
+
+        close_id = None
+        for t in transitions:
+            if t["name"].lower() in ("done", "closed", "resolved"):
+                close_id = t["id"]
+                break
+        if not close_id:
+            return False
+
+        resp = await client.post(
+            f"{base_url}/rest/api/3/issue/{issue_key}/transitions",
+            headers=_headers(),
+            auth=_auth(),
+            json={"transition": {"id": close_id}},
+        )
+        resp.raise_for_status()
+        return True
+
+
 async def check_or_create_lock(
     build_num: int,
     platform: str,
     build_date_str: str,
+    auto_yes: bool = False,
 ) -> Tuple[bool, Optional[str]]:
     if not Config.JIRA_TOKEN:
         return (True, None)
@@ -117,17 +160,24 @@ async def check_or_create_lock(
         print(f"   {existing['summary']}")
         print(f"   {existing['url']}")
         print(f"   Someone may already be running this analysis.\n")
-        try:
-            answer = input("Continue and publish to existing ticket? (y/n): ").strip().lower()
-        except EOFError:
-            answer = "y"
-        if answer != "y":
-            print("Cancelled.")
-            sys.exit(0)
+        if auto_yes or not sys.stdin.isatty():
+            print("Auto-accepting existing ticket (non-interactive mode)")
+        else:
+            try:
+                answer = input("Continue and publish to existing ticket? (y/n): ").strip().lower()
+            except EOFError:
+                answer = "y"
+            if answer != "y":
+                print("Cancelled.")
+                sys.exit(0)
         return (True, existing["key"])
 
     created = await create_lock_ticket(build_num, platform, build_date_str, project)
     if created:
+        try:
+            await _close_ticket(created["key"])
+        except Exception:
+            pass
         print(f"✅ Created analysis lock ticket: {created['key']} ({created['url']})")
         return (True, created["key"])
 
@@ -176,6 +226,7 @@ async def publish_results(
     failure_names: list,
     md_report_path: str,
     html_report_path: str,
+    version_mismatch: Dict[str, Any] = None,
 ) -> bool:
     """Publish analysis results to the Jira lock ticket: comment + attachments."""
     base_url = Config.JIRA_URL.rstrip('/')
@@ -197,7 +248,15 @@ async def publish_results(
             "",
             f"### Pipeline Failure",
             f"- **Failed step:** {pipeline_failure.get('failed_step', 'Unknown')}",
-            f"- **Error:** {pipeline_failure.get('exception_message', pipeline_failure.get('error_text', 'N/A'))[:200]}",
+            f"- **Error:** {(pipeline_failure.get('exception_message') or pipeline_failure.get('error_text') or 'N/A')[:200]}",
+        ])
+
+    if version_mismatch and version_mismatch.get('has_mismatch'):
+        lines.extend([
+            "",
+            f"### 🚨 Version Mismatch",
+            f"- **Expected (FBC fragment):** {version_mismatch['expected_version']}",
+            f"- **Installed (operator CSV):** {version_mismatch['installed_version']}",
         ])
 
     if failure_names:
@@ -279,10 +338,25 @@ async def fetch_jira_statuses(keys: list) -> Dict[str, Dict[str, Any]]:
                         content = body.get("content", [])
                         if content and content[0].get("content"):
                             latest = content[0]["content"][0].get("text", "")[:200]
+                    pr_links = []
+                    try:
+                        rl_resp = await client.get(
+                            f"{base_url}/rest/api/3/issue/{key}/remotelink",
+                            headers=_headers(),
+                            auth=_auth(),
+                        )
+                        if rl_resp.status_code == 200:
+                            for link in rl_resp.json():
+                                url = link.get("object", {}).get("url", "")
+                                if "github.com/" in url and "/pull/" in url:
+                                    pr_links.append(url)
+                    except Exception:
+                        pass
                     result[key] = {
                         "status": status,
                         "summary": summary,
                         "latest_comment": latest,
+                        "pr_links": pr_links,
                     }
                 except Exception:
                     continue
