@@ -175,6 +175,18 @@ If `--regenerate-html` is not available, use the report_generator module directl
 
 Then re-upload both updated files to the Jira lock ticket (delete old attachments first if needed).
 
+### 4d. Create Jira blocker bugs for critical failures
+When the analysis reveals a critical failure that blocks all tests (e.g., dashboard crash, operator deployment failure), create a Jira Bug in RHOAIENG with the following fields:
+
+| Field | Value |
+|-------|-------|
+| **Issue Type** | Bug (id: `10016`) |
+| **Priority** | Blocker (id: `10000`) |
+| **Labels** | `cypress_found_bug`, `found_in_nightly` |
+| **Activity Type** | `Tech Debt & Quality` (custom field `customfield_10464`) |
+| **Affects Version** | The current RHOAI version (e.g., `rhoai-3.5.EA2`) |
+
+The description should include: root cause, crash logs, evidence (image SHAs, debug findings), fix recommendation, and workaround.
 ### 5. Post agent analysis summary to Jira
 After analyzing the results, post a structured **agent analysis summary** as a comment on the lock ticket using `scripts/post_analysis_summaries.py jira`. Pass real failures as `name:error:jira_key` comma-separated, cluster pods as `total:running:failed`, and pipeline failure as `step:exception`. Use `--extra-notes` for key observations from the analysis.
 
