@@ -164,39 +164,73 @@ After presenting the report:
 - Consult the odh-dashboard repo to look at the actual test code for any confusing failures
 
 ### 4b. Deep analysis of uninvestigated failures
-After the initial analysis, check each real failure (not flaky) for existing investigation context: a known Jira bug, a prior deep analysis in a previous thread, or a clear root cause from the automated report. For any failure that **lacks** this context, automatically perform a deeper investigation:
-- Read the test source code in odh-dashboard to understand what it does and where it fails
-- Search for recent PRs that touch the relevant code paths (model serving, model registry, MLflow, etc.)
-- Check cluster state via K8s MCP tools (pod health, events, resource pressure, stuck resources)
-- Search Jira for related tickets
-- Look at screenshots/videos from the failure artifacts
-- **Check operator age and version** — how old is the deployed operator image? When was it built? Is it running an outdated version that's missing fixes? Use tracer output, CSV metadata, or `oc get csv` to determine the operator build date and version. If the operator is more than a few days old, note this — stale operator images are a common source of "fixed but still failing" issues.
-- **Search for related PRs** — use `gh search code`, `gh api repos/.../commits`, and `gh pr list` to find PRs that recently touched the relevant code paths. For each PR, note: title, author, merge date, and whether it's in the deployed image. Pay attention to PRs merged AFTER the operator image was built — those fixes won't be in this build.
-- **Search for related Jira tickets** — search RHOAIENG project for tickets mentioning the test name, the component, or the error message. For each ticket, note: key, summary, status, assignee, and any recent comments that indicate progress or a fix.
-- **Check the console log** — grep the Jenkins console output for the specific test name to find the exact error, timing, and any cluster events that correlate with the failure.
+
+After the initial analysis, identify every **real failure** (did NOT pass on retry). For each one, check if it already has investigation context: a known Jira bug, a prior deep analysis, or a clear root cause from the automated report. For any failure that **lacks** context, run the full investigation checklist below.
 
 **Only do this if fewer than 15 tests need deep investigation.** If 15+, post a summary and ask the user which failures to prioritize.
+
+#### Investigation checklist (mandatory, in order)
+
+For **every** uninvestigated real failure, complete ALL of the following steps:
+
+1. **Test report & error message** — Read the MD report (`reports/current/{RHOAI|ODH}/latest-build-{N}.md`) to understand the failure category, error message, and test steps that were executed.
+
+2. **Screenshots** — Look at the downloaded screenshots in `reports/current/{RHOAI|ODH}/screenshots/` to see what the UI displayed at the moment of failure. Describe what you see.
+
+3. **Videos** — Check `reports/current/{RHOAI|ODH}/videos/` for screen recordings of the test run. If a video exists, describe the failure sequence visible in the recording.
+
+4. **Jenkins console log** — Grep the Jenkins console output for the specific test name to find the exact error, stack trace, timing, and any cluster events that correlate with the failure.
+
+5. **Cluster status** — Use K8s MCP tools to check pod health, events, operator status, and resource pressure in the relevant namespaces (`redhat-ods-applications`, `redhat-ods-operator`, test namespaces).
+
+6. **Operator age and version** — How old is the deployed operator image? When was it built? Use tracer output, CSV metadata, or `oc get csv` to determine the operator build date and version. If the operator is more than a few days old, note this — stale operator images are a common source of "fixed but still failing" issues.
+
+7. **Previous analysis** — Search Jira for the lock ticket from the previous build to check if this same failure was already investigated. Note if it's persistent, new, or regressed.
+
+8. **Existing Jira bugs** — Search RHOAIENG project for open tickets mentioning the test name, component, or error message. For each ticket, note: key, summary, status, assignee, and any recent comments that indicate progress or a fix.
+
+9. **Code changes** — Search the odh-dashboard repo for recent PRs that touch the relevant test files, components, or API routes. Use `gh search code`, `gh api repos/.../commits`, and `gh pr list`. For each PR, note: title, author, merge date, and whether it could have caused the failure. Pay attention to PRs merged AFTER the operator image was built — those fixes won't be in this build.
+
+10. **Test source code** — Read the actual test file in the odh-dashboard repo (`frontend/src/__tests__/cypress/cypress/tests/e2e/`) to understand what the test does, what it asserts, and where it fails.
+
+11. **Rerun the test** — If the root cause is still unclear after steps 1–10 and the failure could be flaky, rerun the test to check. If it passes on retry, reclassify as flaky.
+
+#### Post results to Jira
 
 Post results as **one Jira comment per failure cluster** on the lock ticket. Group tests that share the same root cause into a single comment (e.g., 8 model serving tests all broken by the same PR, 3 MLflow tests caused by the same DSC config issue). Each comment should be self-contained with full context.
 
 ### 4c. Update reports with deep analysis findings
-After the deep analysis completes, **append the findings to the MD report** and **regenerate the HTML report**. The reports are the permanent record and must contain the complete picture — not just the automated script output.
 
-For each failure cluster, append a section to the MD report under a new `## 🔬 Deep Analysis` heading at the end, containing:
+After the deep analysis completes, **update both the MD and HTML reports**. The reports are the permanent record and must contain the complete investigation — not just the automated script output.
+
+Write a markdown file with your deep analysis findings under a `## 🔬 Deep Analysis` heading. For each failure cluster, include:
 - **Root cause** — what actually went wrong, not just the error message
+- **Evidence** — what you found in screenshots, videos, console logs, and cluster state
 - **Related PRs** — links to PRs that caused, fixed, or are related to the failure, with their status (merged/open/closed)
 - **Related Jira tickets** — links with current status (New/In Progress/Review/Resolved)
 - **Trend** — is this persistent, new, regressed, or recovered vs previous builds?
-- **Reclassification** — if the deep analysis reveals a test is actually flaky (passed on retry) or has a different root cause than initially categorized
+- **Reclassification** — if the deep analysis reveals a test is actually flaky or has a different root cause than initially categorized
 - **Recommended action** — what needs to happen to fix this
 
-After updating the MD, regenerate the HTML:
-```bash
-venv/bin/python scripts/comprehensive_analysis.py --regenerate-html reports/current/{RHOAI|ODH}/latest-build-{N}.md
-```
-If `--regenerate-html` is not available, use the report_generator module directly or convert with pandoc.
+Then use the injection script to update both reports and re-upload to Jira in one step:
 
-Then re-upload both updated files to the Jira lock ticket (delete old attachments first if needed).
+```bash
+# Write deep analysis to a temp file (use Write tool, not bash heredoc)
+# Then inject + upload:
+python scripts/inject_deep_analysis.py \
+    reports/current/{RHOAI|ODH}/latest-build-{N}.html \
+    /tmp/deep_analysis.md \
+    --update-md reports/current/{RHOAI|ODH}/latest-build-{N}.md \
+    --jira-ticket RHOAIENG-XXXXX
+```
+
+The script does everything in one call:
+1. Injects deep analysis HTML into the report before the `<footer>` tag
+2. Appends the markdown to the MD report (idempotent — skips if already present)
+3. Deletes old attachments with the same filenames from the Jira ticket
+4. Uploads the updated HTML and MD files to the Jira ticket
+
+Do NOT regenerate the HTML from scratch or edit it manually — the original HTML contains embedded screenshots and videos that would be lost.
 
 ### 4d. Create Jira blocker bugs for critical failures
 When the analysis reveals a critical failure that blocks all tests (e.g., dashboard crash, operator deployment failure), create a Jira Bug in RHOAIENG with the following fields:

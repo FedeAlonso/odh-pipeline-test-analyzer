@@ -18,7 +18,7 @@ Environment variables:
   JENKINS_USER                Jenkins username (required)
   JENKINS_TOKEN               Jenkins API token (required)
   FRONTEND_REPO_PATH          Path to odh-dashboard clone (optional, auto-cloned if missing)
-  SKIP_DEEP_ANALYSIS          Set to "true" to skip Claude Code agent step
+  SKIP_DEEP_ANALYSIS          Set to "true" to skip Claude Code agent step (runs by default)
   SKIP_RERUN                  Set to "true" to skip test reruns
   SKIP_SLACK                  Set to "true" to skip Slack posting
   SKIP_JIRA                   Set to "true" to skip Jira operations
@@ -63,7 +63,7 @@ def has_claude_auth() -> bool:
     """Check if Claude API authentication is configured (direct or Vertex)."""
     if os.getenv("ANTHROPIC_API_KEY"):
         return True
-    if os.getenv("CLAUDE_CODE_USE_VERTEX") == "1":
+    if os.getenv("CLAUDE_CODE_USE_VERTEX", "").lower() in ("1", "true"):
         if os.getenv("ANTHROPIC_VERTEX_PROJECT_ID") and os.getenv("CLOUD_ML_REGION"):
             return True
     return False
@@ -181,20 +181,31 @@ def run_analysis(build_number: str, product: str) -> int:
     return result.returncode
 
 
-def run_deep_analysis(build_number: str, product: str) -> int:
-    """Run Claude Code agent for deep analysis, Jira posting, and Slack thread."""
-    skip_slack = not is_false("SKIP_SLACK")
+def build_deep_analysis_prompt(build_number: str, product: str) -> str:
+    """Build a deterministic prompt with build facts. Investigation steps are in CLAUDE.md."""
+    name = product.upper()
     skip_jira = is_true("SKIP_JIRA")
 
-    slack_instruction = "" if skip_slack else " Post analysis to Slack thread."
-    jira_instruction = "" if skip_jira else " Post findings to Jira lock ticket."
+    flags = []
+    if skip_jira:
+        flags.append("Skip Jira posting.")
 
-    prompt = (
-        f"Run nightly analysis for build {build_number} {product}. "
-        f"Deep analysis of uninvestigated failures."
-        f"{jira_instruction}{slack_instruction} "
-        f"Do NOT ask for confirmation — run everything autonomously."
-    )
+    flags_str = " ".join(flags)
+
+    return (
+        f"Run nightly analysis for build {build_number} {name}. "
+        f"The Phase 1 automated analysis already ran — reports are at "
+        f"reports/current/{name}/latest-build-{build_number}.md and "
+        f"reports/current/{name}/latest-build-{build_number}.html. "
+        f"Execute steps 4b, 4c, 4d, and 5 from the Agent Workflow in CLAUDE.md. "
+        f"Use scripts/inject_deep_analysis.py to update the reports. "
+        f"Do NOT ask for confirmation — run everything autonomously. {flags_str}"
+    ).strip()
+
+
+def run_deep_analysis(build_number: str, product: str) -> int:
+    """Run Claude Code agent for deep analysis, Jira posting, and Slack thread."""
+    prompt = build_deep_analysis_prompt(build_number, product)
 
     cmd = [
         "claude",
@@ -202,7 +213,10 @@ def run_deep_analysis(build_number: str, product: str) -> int:
         "--dangerously-skip-permissions",
     ]
 
-    auth_mode = "Vertex AI" if os.getenv("CLAUDE_CODE_USE_VERTEX") == "1" else "Anthropic API"
+    use_vertex = os.getenv("CLAUDE_CODE_USE_VERTEX", "").lower() in ("1", "true")
+    if use_vertex:
+        os.environ["CLAUDE_CODE_USE_VERTEX"] = "1"
+    auth_mode = "Vertex AI" if use_vertex else "Anthropic API"
     log(f"Running Claude Code agent for deep analysis (auth: {auth_mode})...")
     result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
     return result.returncode
