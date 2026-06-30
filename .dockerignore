@@ -1,0 +1,12 @@
+venv/
+reports/
+.env
+.env.local
+.env.*.local
+.git/
+*.pyc
+__pycache__/
+.DS_Store
+.idea/
+.vscode/
+test-variables/

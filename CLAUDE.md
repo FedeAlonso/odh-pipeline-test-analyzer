@@ -28,6 +28,29 @@ venv/bin/pip install -r requirements.txt
 
 There is no test suite. Verify changes by running the analyzer against a real build and reviewing the generated report.
 
+### CI Container Mode
+
+The analyzer can run inside a container for Jenkins pipeline integration (`Containerfile.ci`).
+
+```bash
+# Build
+podman build -f Containerfile.ci -t pipeline-test-analyzer .
+
+# Run (analysis only, no AI/Jira/Slack)
+podman run --rm --env-file .env \
+    -e BUILD_NUMBER=1571 -e PRODUCT=rhoai \
+    -e SKIP_DEEP_ANALYSIS=true -e SKIP_JIRA=true -e SKIP_SLACK=true \
+    pipeline-test-analyzer
+
+# Run (full workflow with Claude Code agent)
+podman run --rm --env-file .env \
+    -e BUILD_NUMBER=1571 -e PRODUCT=rhoai \
+    -e ANTHROPIC_API_KEY=sk-... \
+    pipeline-test-analyzer
+```
+
+Entry point: `scripts/ci_entrypoint.py`. Skip flags: `SKIP_DEEP_ANALYSIS`, `SKIP_JIRA`, `SKIP_RERUN` (all `=true` to activate). `SKIP_SLACK` defaults to skipped in CI (Slack session tokens are short-lived and unsuitable for automation); set `SKIP_SLACK=false` to override.
+
 ## Architecture
 
 ### Entry Points
