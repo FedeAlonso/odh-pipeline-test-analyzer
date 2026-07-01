@@ -42,10 +42,20 @@ podman run --rm --env-file .env \
     -e SKIP_DEEP_ANALYSIS=true -e SKIP_JIRA=true -e SKIP_SLACK=true \
     pipeline-test-analyzer
 
-# Run (full workflow with Claude Code agent)
+# Run (full workflow with Claude Code agent — direct Anthropic API)
 podman run --rm --env-file .env \
     -e BUILD_NUMBER=1571 -e PRODUCT=rhoai \
     -e ANTHROPIC_API_KEY=sk-... \
+    pipeline-test-analyzer
+
+# Run (full workflow with Claude Code agent — Vertex AI with service account)
+podman run --rm --env-file .env \
+    -e BUILD_NUMBER=1571 -e PRODUCT=rhoai \
+    -e CLAUDE_CODE_USE_VERTEX=1 \
+    -e ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id \
+    -e CLOUD_ML_REGION=us-east5 \
+    -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa-key.json \
+    -v /path/to/your-sa-key.json:/tmp/sa-key.json:ro \
     pipeline-test-analyzer
 ```
 

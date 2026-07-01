@@ -256,7 +256,8 @@ def main():
 
     if analysis_rc != 0:
         log(f"Automated analysis exited with code {analysis_rc}")
-        log("Continuing to deep analysis despite errors...")
+        log("Skipping deep analysis — Phase 1 failed (missing artifacts or fatal error)")
+        skip_deep = True
 
     # Configure MCP servers for Claude Code (Slack, K8s)
     if not skip_deep:
