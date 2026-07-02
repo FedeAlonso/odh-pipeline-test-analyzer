@@ -1,0 +1,65 @@
+{
+  "name": "model-registry",
+  "framework": "pytest",
+  "version": "1.0.0",
+  "description": "Model Registry Python client and E2E tests using pytest",
+  "maintainers": [
+    "@model-registry-team"
+  ],
+  "jenkins": {
+    "job_paths": [
+      "rhoai/3.4/selfmanaged/cli/aws/rhoai-sanity"
+    ],
+    "artifact_patterns": [
+      "**/ai-hub*.xml",
+      "**/model-registry*.xml"
+    ]
+  },
+  "test_framework": {
+    "type": "pytest",
+    "test_directory": "tests/",
+    "test_file_pattern": "test_*.py",
+    "runner_command": "pytest -v",
+    "rerun_command": "pytest -v {spec_path}"
+  },
+  "cluster": {
+    "namespaces": [
+      "redhat-ods-applications",
+      "model-registry"
+    ],
+    "resource_types": [
+      "pods",
+      "deployments",
+      "services"
+    ]
+  },
+  "analysis": {
+    "parser_module": "parser.py",
+    "failure_categories": [
+      "timeout",
+      "assertion",
+      "api_error",
+      "database_error",
+      "connection_error",
+      "unknown"
+    ]
+  },
+  "reporting": {
+    "reporter_module": "reporter.py"
+  },
+  "repository": {
+    "url": "https://github.com/opendatahub-io/model-registry",
+    "type": "github",
+    "default_branch": "main"
+  },
+  "metadata": {
+    "tags": [
+      "python",
+      "pytest",
+      "integration",
+      "e2e",
+      "ai-hub"
+    ],
+    "priority": "high"
+  }
+}

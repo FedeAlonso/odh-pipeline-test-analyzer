@@ -1,0 +1,128 @@
+{
+  "name": "dashboard",
+  "framework": "cypress",
+  "version": "1.0.0",
+  "description": "ODH/RHOAI Dashboard E2E tests using Cypress framework",
+  "maintainers": [
+    "@dashboard-team",
+    "@frontend-team"
+  ],
+
+  "jenkins": {
+    "job_paths": [
+      "cypress/dashboard-tests",
+      "devops/rhoai-test-flow"
+    ],
+    "job_descriptions": [
+      "dash-e2e-rhoai",
+      "dash-e2e-odh"
+    ],
+    "artifact_patterns": [
+      "**/mochawesome*.json",
+      "**/cypress-results*.json",
+      "**/screenshots/**/*.png",
+      "**/videos/**/*.mp4"
+    ],
+    "parent_jobs": [
+      "devops/rhoai-test-flow"
+    ]
+  },
+
+  "test_framework": {
+    "type": "cypress",
+    "version": "^13.0.0",
+    "test_directory": "frontend/src/__tests__/cypress/cypress/tests/e2e/",
+    "test_file_pattern": "*.cy.ts",
+    "runner_command": "npm run cy:run:safe",
+    "rerun_command": "npm run cy:run:safe -- --spec '{spec_path}'",
+    "config_file": "frontend/cypress.config.ts"
+  },
+
+  "cluster": {
+    "namespaces": [
+      "redhat-ods-applications",
+      "redhat-ods-monitoring",
+      "redhat-ods-operator",
+      "rhods-notebooks",
+      "opendatahub"
+    ],
+    "resource_types": [
+      "pods",
+      "deployments",
+      "services",
+      "routes",
+      "configmaps"
+    ],
+    "label_selectors": {
+      "app": "odh-dashboard",
+      "component": "dashboard"
+    }
+  },
+
+  "analysis": {
+    "parser_module": "parser.py",
+    "analyzer_module": "analyzer.py",
+    "failure_categories": [
+      "timeout",
+      "assertion",
+      "element_not_found",
+      "network",
+      "auth",
+      "resource",
+      "navigation",
+      "screenshot_diff",
+      "unknown"
+    ],
+    "custom_patterns": {
+      "selector_timeout": "Timed out retrying.*cy\\.(get|contains|find)",
+      "navigation_failure": "cy\\.visit\\(\\).*failed",
+      "api_failure": "cy\\.request\\(\\).*failed",
+      "assertion_failure": "AssertionError.*expected.*to"
+    }
+  },
+
+  "jira": {
+    "projects": [
+      "RHOAIENG",
+      "RHODS"
+    ],
+    "components": [
+      "Dashboard",
+      "UI"
+    ],
+    "search_patterns": "jira_patterns.py",
+    "labels": [
+      "e2e-test",
+      "cypress",
+      "frontend"
+    ]
+  },
+
+  "reporting": {
+    "template": "templates/report.md.j2",
+    "include_screenshots": true,
+    "include_cluster_health": true,
+    "include_retry_analysis": true,
+    "max_failures_to_display": 50
+  },
+
+  "repository": {
+    "url": "https://github.com/opendatahub-io/odh-dashboard",
+    "type": "github",
+    "default_branch": "main"
+  },
+
+  "metadata": {
+    "tags": [
+      "frontend",
+      "ui",
+      "e2e",
+      "cypress"
+    ],
+    "priority": "critical",
+    "sla": {
+      "max_failure_rate": 0.1,
+      "max_response_time": "2h"
+    }
+  }
+}

@@ -1,11 +1,13 @@
-# ODH Pipeline Test Analyzer
+# Test Failure Analysis Platform
 
-Comprehensive analysis tool for ODH/RHOAI pipeline test results on OpenShift clusters. Analyzes Cypress E2E test results, cluster health, and pipeline status for RHOAI/ODH dashboard builds. Connects to Jenkins, inspects cluster resources, and generates detailed reports with actionable recommendations.
+Multi-component test failure analysis platform for RHOAI/ODH. Self-service onboarding for ~50-162 component teams. Supports multiple test frameworks (pytest, Cypress, Robot Framework, Golang, Jest) and multiple pipelines. Generates professional HTML reports with team-specific failure analysis.
 
 ## 📚 Documentation
 
-- **[CLAUDE_AGENT_GUIDE.md](docs/CLAUDE_AGENT_GUIDE.md)** - 🤖 **Quick reference for AI agents** - Start here!
+- **[TEAM_ONBOARDING.md](TEAM_ONBOARDING.md)** - 🚀 **Component team onboarding guide** - Start here!
+- **[CLAUDE_AGENT_GUIDE.md](docs/CLAUDE_AGENT_GUIDE.md)** - 🤖 Quick reference for AI agents
 - **[JIRA_SEARCH_PATTERNS.md](docs/JIRA_SEARCH_PATTERNS.md)** - Intelligent Jira search patterns
+- **[MODULAR_PLATFORM_ARCHITECTURE.md](docs/MODULAR_PLATFORM_ARCHITECTURE.md)** - Platform architecture details
 
 ## Features
 
