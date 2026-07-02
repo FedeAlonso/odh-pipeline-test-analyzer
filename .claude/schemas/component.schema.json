@@ -1,0 +1,294 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/antowaddle/odh-pipeline-test-analyzer/schemas/component.json",
+  "title": "Component Test Analysis Configuration",
+  "description": "Configuration schema for component-specific test analysis plugins",
+  "type": "object",
+  "required": ["name", "framework", "version", "jenkins", "test_framework", "analysis"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Component name (e.g., 'dashboard', 'model-registry')",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "framework": {
+      "type": "string",
+      "description": "Test framework used (e.g., 'cypress', 'pytest', 'golang')",
+      "enum": ["cypress", "pytest", "golang", "jest", "junit", "selenium"]
+    },
+    "version": {
+      "type": "string",
+      "description": "Component configuration version (semver)",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of the component and its tests"
+    },
+    "maintainers": {
+      "type": "array",
+      "description": "List of team members or teams responsible for this component",
+      "items": {
+        "type": "string",
+        "pattern": "^@[a-zA-Z0-9-]+$"
+      },
+      "minItems": 1
+    },
+    "jenkins": {
+      "type": "object",
+      "description": "Jenkins job configuration",
+      "required": ["job_paths"],
+      "properties": {
+        "job_paths": {
+          "type": "array",
+          "description": "List of Jenkins job paths that test this component",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "job_descriptions": {
+          "type": "array",
+          "description": "Job description patterns to match (e.g., 'dash-e2e-rhoai')",
+          "items": {
+            "type": "string"
+          }
+        },
+        "artifact_patterns": {
+          "type": "array",
+          "description": "Glob patterns for test result artifacts",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "parent_jobs": {
+          "type": "array",
+          "description": "Parent orchestrator jobs that trigger this component's tests",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "test_framework": {
+      "type": "object",
+      "description": "Test framework-specific configuration",
+      "required": ["type", "test_directory"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Test framework type",
+          "enum": ["cypress", "pytest", "golang", "jest", "junit", "selenium"]
+        },
+        "version": {
+          "type": "string",
+          "description": "Framework version constraint"
+        },
+        "test_directory": {
+          "type": "string",
+          "description": "Relative path to test directory in repository"
+        },
+        "test_file_pattern": {
+          "type": "string",
+          "description": "Glob pattern for test files (e.g., '*.cy.ts', 'test_*.py')"
+        },
+        "runner_command": {
+          "type": "string",
+          "description": "Command to run all tests"
+        },
+        "rerun_command": {
+          "type": "string",
+          "description": "Command template to rerun specific test (use {spec_path} placeholder)"
+        },
+        "config_file": {
+          "type": "string",
+          "description": "Path to framework config file (e.g., cypress.config.ts, pytest.ini)"
+        }
+      }
+    },
+    "cluster": {
+      "type": "object",
+      "description": "OpenShift/Kubernetes cluster configuration",
+      "properties": {
+        "namespaces": {
+          "type": "array",
+          "description": "Namespaces to inspect for this component",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "resource_types": {
+          "type": "array",
+          "description": "Resource types to check (pods, deployments, services, etc.)",
+          "items": {
+            "type": "string"
+          },
+          "default": ["pods", "deployments", "services"]
+        },
+        "label_selectors": {
+          "type": "object",
+          "description": "Label selectors to filter resources",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "description": "Analysis module configuration",
+      "required": ["parser_module"],
+      "properties": {
+        "parser_module": {
+          "type": "string",
+          "description": "Python module name for test parser (e.g., 'parser.py')"
+        },
+        "analyzer_module": {
+          "type": "string",
+          "description": "Python module name for failure analyzer (e.g., 'analyzer.py')"
+        },
+        "failure_categories": {
+          "type": "array",
+          "description": "Supported failure categories for this component",
+          "items": {
+            "type": "string"
+          },
+          "default": ["timeout", "assertion", "unknown"]
+        },
+        "custom_patterns": {
+          "type": "object",
+          "description": "Custom regex patterns for failure detection",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "jira": {
+      "type": "object",
+      "description": "Jira integration configuration",
+      "properties": {
+        "projects": {
+          "type": "array",
+          "description": "Jira projects to search",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "components": {
+          "type": "array",
+          "description": "Jira components to search",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "search_patterns": {
+          "type": "string",
+          "description": "Python module with custom Jira search patterns"
+        },
+        "labels": {
+          "type": "array",
+          "description": "Default labels to include in searches",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "reporting": {
+      "type": "object",
+      "description": "Report generation configuration",
+      "properties": {
+        "template": {
+          "type": "string",
+          "description": "Path to custom Jinja2 report template",
+          "default": "templates/report.md.j2"
+        },
+        "include_screenshots": {
+          "type": "boolean",
+          "description": "Include test screenshots in report",
+          "default": true
+        },
+        "include_cluster_health": {
+          "type": "boolean",
+          "description": "Include cluster health inspection in report",
+          "default": true
+        },
+        "include_retry_analysis": {
+          "type": "boolean",
+          "description": "Automatically rerun failed tests to detect flakiness",
+          "default": false
+        },
+        "max_failures_to_display": {
+          "type": "integer",
+          "description": "Maximum number of failures to include in report",
+          "default": 50,
+          "minimum": 1
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "description": "Source repository configuration",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Repository URL (GitHub, GitLab, etc.)",
+          "format": "uri"
+        },
+        "type": {
+          "type": "string",
+          "description": "Repository hosting platform",
+          "enum": ["github", "gitlab"]
+        },
+        "default_branch": {
+          "type": "string",
+          "description": "Default branch name",
+          "default": "main"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional metadata",
+      "properties": {
+        "tags": {
+          "type": "array",
+          "description": "Tags for categorizing this component",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "priority": {
+          "type": "string",
+          "description": "Component priority level",
+          "enum": ["critical", "high", "medium", "low"],
+          "default": "medium"
+        },
+        "sla": {
+          "type": "object",
+          "description": "SLA targets for this component",
+          "properties": {
+            "max_failure_rate": {
+              "type": "number",
+              "description": "Maximum acceptable failure rate (0-1)",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "max_response_time": {
+              "type": "string",
+              "description": "Maximum time to analyze failures (e.g., '2h')"
+            }
+          }
+        }
+      }
+    }
+  }
+}
