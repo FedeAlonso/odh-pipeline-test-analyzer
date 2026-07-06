@@ -53,10 +53,9 @@ RUN ARCH=$(uname -m) && \
     chmod +x /usr/local/bin/gh
 
 # Tracer tool (image metadata extraction for RHOAI/ODH builds)
-RUN mkdir -p /usr/local/share/tracer && \
-    curl -sL "https://raw.githubusercontent.com/red-hat-data-services/rhods-devops-infra/main/tools/tracer/tracer.sh" \
-        -o /usr/local/share/tracer/tracer.sh && \
-    chmod +x /usr/local/share/tracer/tracer.sh
+# Vendored from https://github.com/red-hat-data-services/rhods-devops-infra/tree/main/tools/tracer
+COPY tools/tracer.sh /usr/local/share/tracer/tracer.sh
+RUN chmod +x /usr/local/share/tracer/tracer.sh
 
 # Node.js 20 LTS (for Claude Code CLI)
 RUN dnf module enable -y nodejs:20 && \
