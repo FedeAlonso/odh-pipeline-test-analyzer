@@ -142,7 +142,7 @@ def setup_tracer():
     tracer = os.getenv("TRACER_PATH", "/usr/local/bin/tracer.sh")
     if Path(tracer).exists():
         result = subprocess.run(
-            [tracer, "configure"],
+            ["bash", tracer, "configure"],
             capture_output=True, text=True,
         )
         if "Login Succeeded" in (result.stdout + result.stderr):

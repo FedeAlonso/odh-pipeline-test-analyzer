@@ -114,7 +114,7 @@ def get_image_metadata_with_tracer(image_uri: str) -> dict:
 
     try:
         result = subprocess.run(
-            [tracer_path, '-i', image_uri, '-c'],
+            ['bash', tracer_path, '-i', image_uri, '-c'],
             capture_output=True,
             text=True,
             timeout=60
