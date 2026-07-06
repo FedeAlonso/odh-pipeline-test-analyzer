@@ -19,7 +19,15 @@ RUN dnf install -y --nodocs --allowerasing \
         jq \
         tar \
         gzip \
+        skopeo \
     && dnf clean all
+
+# yq (YAML processor — required by tracer)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ]; then YQ_ARCH="arm64"; else YQ_ARCH="amd64"; fi && \
+    curl -sL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${YQ_ARCH}" \
+        -o /usr/local/bin/yq && \
+    chmod +x /usr/local/bin/yq
 
 # oc CLI (4.19 stable) — architecture-aware
 RUN ARCH=$(uname -m) && \
@@ -43,6 +51,12 @@ RUN ARCH=$(uname -m) && \
     curl -sL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz" \
     | tar xz --strip-components=1 -C /usr/local && \
     chmod +x /usr/local/bin/gh
+
+# Tracer tool (image metadata extraction for RHOAI/ODH builds)
+RUN mkdir -p /usr/local/share/tracer && \
+    curl -sL "https://raw.githubusercontent.com/red-hat-data-services/rhods-devops-infra/main/tools/tracer/tracer.sh" \
+        -o /usr/local/share/tracer/tracer.sh && \
+    chmod +x /usr/local/share/tracer/tracer.sh
 
 # Node.js 20 LTS (for Claude Code CLI)
 RUN dnf module enable -y nodejs:20 && \
@@ -76,8 +90,12 @@ COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=builder /usr/local/bin/claude /usr/local/bin/claude
 COPY --from=builder /usr/local/bin/kubernetes-mcp-server /usr/local/bin/kubernetes-mcp-server
 
-# Install git (needed at runtime for odh-dashboard clone and test reruns)
-RUN dnf install -y --nodocs --allowerasing git jq curl && dnf clean all
+# Install git, jq, skopeo (needed at runtime for odh-dashboard clone, test reruns, and tracer)
+RUN dnf install -y --nodocs --allowerasing git jq curl skopeo && dnf clean all
+
+# Copy yq and tracer from builder
+COPY --from=builder /usr/local/bin/yq /usr/local/bin/yq
+COPY --from=builder /usr/local/share/tracer/tracer.sh /usr/local/bin/tracer.sh
 
 # Copy Python site-packages from builder
 COPY --from=builder /opt/app-root/lib/python3.11/site-packages /opt/app-root/lib/python3.11/site-packages
@@ -108,6 +126,7 @@ RUN HOME_DIR=/opt/app-root/src && \
 
 ENV PYTHONUNBUFFERED=1
 ENV REPORT_OUTPUT_DIR=/app/reports
+ENV TRACER_PATH=/usr/local/bin/tracer.sh
 
 # Run as non-root (required by Claude Code --dangerously-skip-permissions)
 USER 1001

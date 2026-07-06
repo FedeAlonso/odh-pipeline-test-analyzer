@@ -125,6 +125,32 @@ def validate_env():
     return missing
 
 
+def setup_tracer():
+    """Configure tracer Quay auth if QUAY_TRACER_TOKEN is set."""
+    token = os.getenv("QUAY_TRACER_TOKEN")
+    if not token:
+        log("Tracer: QUAY_TRACER_TOKEN not set — tracer will run without Quay auth")
+        return
+
+    home = Path(os.environ.get("HOME", "/opt/app-root/src"))
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    token_file = ssh_dir / ".rhoai_quay_ro_token"
+    token_file.write_text(token)
+    log("Tracer: Quay auth token written")
+
+    tracer = os.getenv("TRACER_PATH", "/usr/local/bin/tracer.sh")
+    if Path(tracer).exists():
+        result = subprocess.run(
+            [tracer, "configure"],
+            capture_output=True, text=True,
+        )
+        if "Login Succeeded" in (result.stdout + result.stderr):
+            log("Tracer: skopeo login succeeded")
+        else:
+            log(f"Tracer: skopeo login may have failed — {result.stdout.strip()} {result.stderr.strip()}")
+
+
 def setup_frontend_repo():
     """Clone odh-dashboard if FRONTEND_REPO_PATH is not set."""
     frontend_path = os.getenv("FRONTEND_REPO_PATH")
@@ -246,6 +272,7 @@ def main():
     log(f"Slack: {'disabled (default in CI — set SKIP_SLACK=false to enable)' if skip_slack else 'enabled'}")
 
     # Setup
+    setup_tracer()
     setup_frontend_repo()
 
     # Phase 1: Automated analysis

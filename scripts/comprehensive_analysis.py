@@ -2768,6 +2768,12 @@ async def main():
             jira_enabled, lock_ticket_key = await check_or_create_lock(build_num, name, build_date_str, auto_yes=auto_yes)
         except Exception as e:
             print(f"⚠️  Jira lock check failed ({e}). Continuing without lock...")
+    if lock_ticket_key:
+        try:
+            from pathlib import Path
+            Path("/app/jira-ticket.txt").write_text(lock_ticket_key)
+        except Exception:
+            pass
     if skip_slack:
         print("⏭️  Skipping Slack (--skip-slack)")
     if skip_rerun:
