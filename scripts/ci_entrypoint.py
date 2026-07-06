@@ -141,6 +141,10 @@ def setup_tracer():
 
     tracer = os.getenv("TRACER_PATH", "/usr/local/bin/tracer.sh")
     if Path(tracer).exists():
+        home = Path(os.environ.get("HOME", "/opt/app-root/src"))
+        auth_file = home / ".config" / "containers" / "auth.json"
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("REGISTRY_AUTH_FILE", str(auth_file))
         result = subprocess.run(
             ["bash", tracer, "configure"],
             capture_output=True, text=True,
