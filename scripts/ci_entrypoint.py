@@ -22,6 +22,9 @@ Environment variables:
   SKIP_RERUN                  Set to "true" to skip test reruns
   SKIP_SLACK                  Set to "true" to skip Slack posting
   SKIP_JIRA                   Set to "true" to skip Jira operations
+  CLUSTER_USERNAME            Cluster admin username (optional, from odhcluster test-variables.yml)
+  CLUSTER_PASSWORD            Cluster admin password (optional, from odhcluster test-variables.yml)
+  CLUSTER_API_URL             Override cluster API URL (optional — auto-extracted from build console)
 
 Claude API auth (one of the following, unless SKIP_DEEP_ANALYSIS=true):
   Option A — Direct Anthropic API:
@@ -38,6 +41,7 @@ Claude API auth (one of the following, unless SKIP_DEEP_ANALYSIS=true):
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -155,6 +159,91 @@ def setup_tracer():
             log(f"Tracer: skopeo login may have failed — {result.stdout.strip()} {result.stderr.strip()}")
 
 
+def extract_cluster_api_url(build_number: str) -> str:
+    """Extract the cluster API URL from the build's console log via Jenkins API."""
+    jenkins_url = os.getenv("JENKINS_URL", "").strip().rstrip("/")
+    jenkins_user = os.getenv("JENKINS_USER", "").strip()
+    jenkins_token = os.getenv("JENKINS_TOKEN", "").strip()
+
+    if not all([jenkins_url, jenkins_user, jenkins_token]):
+        return ""
+
+    try:
+        import httpx
+
+        job_path = "components/dashboard/dashboard-e2e-tests"
+        api_path = "/job/".join(job_path.split("/"))
+        url = f"{jenkins_url}/job/{api_path}/{build_number}/consoleText"
+        resp = httpx.get(
+            url,
+            auth=(jenkins_user, jenkins_token),
+            timeout=30,
+            verify=os.getenv("SSL_VERIFY", "true").lower() == "true",
+            headers={"Range": "bytes=0-50000"},
+        )
+        if resp.status_code not in (200, 206):
+            return ""
+
+        text = resp.text
+        match = re.search(r"Cluster API URL:\s*(https://api\.\S+:\d+)", text)
+        if match:
+            return match.group(1)
+        match = re.search(r"oc login\s+.*\s+(https://api\.\S+:\d+)", text)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+
+    return ""
+
+
+def setup_cluster_access(product: str, build_number: str) -> bool:
+    """Login to test cluster if credentials are available. Creates ~/.kube/config for K8s MCP.
+
+    API URL is auto-extracted from the build's console log. Username and password
+    come from Vault (same credentials for all clusters — odhcluster/test-variables.yml).
+    """
+    username = os.getenv("CLUSTER_USERNAME", "").strip()
+    password = os.getenv("CLUSTER_PASSWORD", "").strip()
+
+    if not all([username, password]):
+        log("Cluster: No credentials provided — cluster inspection will be unavailable")
+        return False
+
+    api_url = os.getenv("CLUSTER_API_URL", "").strip()
+    if not api_url:
+        log("Cluster: Extracting API URL from build console log...")
+        api_url = extract_cluster_api_url(build_number)
+
+    if not api_url:
+        log("Cluster: Could not determine API URL — cluster inspection will be unavailable")
+        return False
+
+    os.environ["CLUSTER_API_URL"] = api_url
+
+    ssl_verify = os.getenv("SSL_VERIFY", "true").lower() == "true"
+    cmd = ["oc", "login", "-u", username, "--server", api_url]
+    if not ssl_verify:
+        cmd.append("--insecure-skip-tls-verify=true")
+
+    result = subprocess.run(
+        cmd, input=password + "\n", capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        log(f"Cluster: Logged in to {api_url}")
+        prefix = product.upper()
+        os.environ[f"{prefix}_API_SERVER"] = api_url
+        os.environ[f"{prefix}_USERNAME"] = username
+        os.environ[f"{prefix}_PASSWORD"] = password
+        return True
+    else:
+        sanitized = result.stderr.strip()
+        if password and password in sanitized:
+            sanitized = sanitized.replace(password, "[REDACTED]")
+        log(f"Cluster: Login failed — {sanitized}")
+        return False
+
+
 def setup_frontend_repo():
     """Clone odh-dashboard if FRONTEND_REPO_PATH is not set."""
     frontend_path = os.getenv("FRONTEND_REPO_PATH")
@@ -211,26 +300,129 @@ def run_analysis(build_number: str, product: str) -> int:
     return result.returncode
 
 
-def build_deep_analysis_prompt(build_number: str, product: str) -> str:
-    """Build a deterministic prompt with build facts. Investigation steps are in CLAUDE.md."""
+def extract_phase1_context(build_number: str, product: str) -> dict:
+    """Extract key findings from Phase 1 MD report for the agent prompt."""
     name = product.upper()
-    skip_jira = is_true("SKIP_JIRA")
+    md_path = PROJECT_ROOT / "reports" / "current" / name / f"latest-build-{build_number}.md"
 
-    flags = []
-    if skip_jira:
-        flags.append("Skip Jira posting.")
+    context = {"failures": [], "flaky": [], "jira_ticket": ""}
 
-    flags_str = " ".join(flags)
+    if not md_path.exists():
+        return context
 
-    return (
-        f"Run nightly analysis for build {build_number} {name}. "
-        f"The Phase 1 automated analysis already ran — reports are at "
-        f"reports/current/{name}/latest-build-{build_number}.md and "
-        f"reports/current/{name}/latest-build-{build_number}.html. "
-        f"Execute steps 4b, 4c, 4d, and 5 from the Agent Workflow in CLAUDE.md. "
-        f"Use scripts/inject_deep_analysis.py to update the reports. "
-        f"Do NOT ask for confirmation — run everything autonomously. {flags_str}"
-    ).strip()
+    content = md_path.read_text()
+
+    # Extract test failures from section headers: ### N. testName.cy.ts [⚠️ *(passed on retry)*]
+    test_pattern = re.compile(
+        r"^### \d+\.\s+(\S+\.cy\.ts)\s*(⚠️\s*\*\(passed on retry\)\*)?",
+        re.MULTILINE,
+    )
+    for m in test_pattern.finditer(content):
+        test_name = m.group(1).replace(".cy.ts", "")
+        if m.group(2):
+            context["flaky"].append(test_name)
+        else:
+            context["failures"].append(test_name)
+
+    # Extract Jira lock ticket from file (written by comprehensive_analysis.py)
+    ticket_file = Path("/app/jira-ticket.txt")
+    if ticket_file.exists():
+        context["jira_ticket"] = ticket_file.read_text().strip()
+
+    return context
+
+
+def find_previous_build_ticket(build_number: str, product: str) -> str:
+    """Search Jira for a recent analysis ticket from a previous build for trend context."""
+    jira_url = os.getenv("JIRA_URL", "").strip()
+    jira_user = os.getenv("JIRA_USER", "").strip()
+    jira_token = os.getenv("JIRA_TOKEN", "").strip()
+
+    if not all([jira_url, jira_user, jira_token]):
+        return ""
+
+    name = product.upper()
+    try:
+        import httpx
+
+        jql = (
+            f'project = RHOAIENG AND summary ~ "Nightly Analysis" '
+            f'AND summary ~ "{name}" '
+            f"ORDER BY created DESC"
+        )
+        resp = httpx.get(
+            f"{jira_url}/rest/api/3/search",
+            params={"jql": jql, "maxResults": 5, "fields": "key,summary"},
+            auth=(jira_user, jira_token),
+            timeout=15,
+            verify=os.getenv("SSL_VERIFY", "true").lower() == "true",
+        )
+        if resp.status_code != 200:
+            return ""
+
+        issues = resp.json().get("issues", [])
+        # Find the first ticket that is NOT for the current build
+        for issue in issues:
+            summary = issue.get("fields", {}).get("summary", "")
+            if f"-{build_number}-" not in summary:
+                return issue["key"]
+    except Exception:
+        pass
+
+    return ""
+
+
+def build_deep_analysis_prompt(build_number: str, product: str) -> str:
+    """Build a context-rich prompt with Phase 1 findings. Investigation steps are in CLAUDE.md."""
+    name = product.upper()
+    context = extract_phase1_context(build_number, product)
+
+    parts = [
+        f"Run deep analysis for build {build_number} {name}.",
+        f"Phase 1 reports: reports/current/{name}/latest-build-{build_number}.md and "
+        f"reports/current/{name}/latest-build-{build_number}.html.",
+    ]
+
+    if context["failures"]:
+        parts.append(
+            f"Real failures to investigate: {', '.join(context['failures'])}."
+        )
+
+    if context["flaky"]:
+        parts.append(
+            f"Flaky tests (passed on retry, lower priority): {', '.join(context['flaky'])}."
+        )
+
+    cluster_url = os.getenv("CLUSTER_API_URL", "").strip()
+    if cluster_url:
+        parts.append(
+            f"Cluster access is configured ({cluster_url}). "
+            f"Use K8s MCP tools to verify pod health, check operator logs, "
+            f"inspect ServingRuntime CRs, and confirm root causes with cluster evidence."
+        )
+
+    prev_ticket = find_previous_build_ticket(build_number, product)
+    if prev_ticket:
+        parts.append(
+            f"Previous build analysis: {prev_ticket}. "
+            f"Read its comments for trend comparison."
+        )
+
+    if context["jira_ticket"]:
+        parts.append(
+            f"This build's lock ticket: {context['jira_ticket']}."
+        )
+
+    parts.append(
+        "Execute steps 4b, 4c, 4d, and 5 from the Agent Workflow in CLAUDE.md. "
+        "Use scripts/inject_deep_analysis.py to update the reports. "
+        "Do NOT ask for confirmation — run everything autonomously."
+    )
+
+    if is_true("SKIP_JIRA"):
+        parts.append("Skip Jira posting.")
+
+    return " ".join(parts)
 
 
 def run_deep_analysis(build_number: str, product: str) -> int:
@@ -277,6 +469,7 @@ def main():
 
     # Setup
     setup_tracer()
+    setup_cluster_access(product, build_number)
     setup_frontend_repo()
 
     # Phase 1: Automated analysis

@@ -2770,7 +2770,6 @@ async def main():
             print(f"⚠️  Jira lock check failed ({e}). Continuing without lock...")
     if lock_ticket_key:
         try:
-            from pathlib import Path
             Path("/app/jira-ticket.txt").write_text(lock_ticket_key)
         except Exception:
             pass
