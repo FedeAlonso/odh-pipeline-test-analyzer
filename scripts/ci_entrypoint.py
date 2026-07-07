@@ -221,6 +221,13 @@ def setup_cluster_access(product: str, build_number: str) -> bool:
 
     os.environ["CLUSTER_API_URL"] = api_url
 
+    # Override KUBECONFIG — the e2e pipeline sets it to a workspace path that may not
+    # be writable inside the TFA container (different HOME, permission denied)
+    home = Path(os.environ.get("HOME", "/opt/app-root/src"))
+    kubeconfig = home / ".kube" / "config"
+    kubeconfig.parent.mkdir(parents=True, exist_ok=True)
+    os.environ["KUBECONFIG"] = str(kubeconfig)
+
     ssl_verify = os.getenv("SSL_VERIFY", "true").lower() == "true"
     cmd = ["oc", "login", "-u", username, "--server", api_url]
     if not ssl_verify:
