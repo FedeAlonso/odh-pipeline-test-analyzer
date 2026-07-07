@@ -1324,6 +1324,7 @@ def generate_html_report(
     stage_timeout_minutes, results_by_stage, test_stages_ran,
     analysis_with_reruns, cluster_analysis, recent_merges, git_analysis,
     all_tests_by_stage=None, version_mismatch=None, cluster_image_ages=None,
+    lock_ticket_key=None,
 ) -> str:
     import html as html_mod
     esc = html_mod.escape
@@ -1949,6 +1950,7 @@ th {{ background:var(--bg2); color:var(--text2); font-weight:600; text-transform
   <h1>{esc(name)} E2E Analysis &mdash; Build #{build_num} <span class="badge {status_cls}">{status_label}</span></h1>
   <div class="header-meta">
     {now} &nbsp;|&nbsp; <a href="{esc(build_url)}">Jenkins Build</a>
+    {f'&nbsp;|&nbsp; <a href="https://redhat.atlassian.net/browse/{esc(lock_ticket_key)}">{esc(lock_ticket_key)}</a>' if lock_ticket_key else ""}
     {"&nbsp;|&nbsp; Nightly: " + esc(nightly_info.get("cluster_name","")) if nightly_info.get("is_nightly") else ""}
   </div>
 </div>
@@ -4397,6 +4399,7 @@ async def main():
         cluster_analysis=cluster_analysis, recent_merges=recent_merges, git_analysis=git_analysis,
         all_tests_by_stage=all_tests_by_stage, version_mismatch=version_mismatch,
         cluster_image_ages=cluster_image_ages,
+        lock_ticket_key=lock_ticket_key,
     )
     html_report_path = f"reports/current/{name}/latest-build-{build_num}.html"
     with open(html_report_path, 'w') as f:
