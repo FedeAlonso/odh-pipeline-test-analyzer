@@ -43,27 +43,37 @@ class PytestDefaultParser(BaseTestParser):
             'passed': 0,
             'failed': 0,
             'skipped': 0,
+            'errors': 0,
             'duration': None,
+            'evidence_status': 'none',
+            'evidence_sources': [],
+            'warnings': [],
             'failures': [],
             'metadata': {}
         }
 
         if not console_log:
+            results['evidence_status'] = 'inconclusive'
+            results['warnings'].append('No console output available')
             return results
 
-        # Pattern 1: Summary line (most reliable)
-        # "=== 1 failed, 2 passed, 1 skipped in 3.45s ==="
-        summary_pattern = r'=+\s*(\d+)\s+failed.*?(\d+)\s+passed(?:.*?(\d+)\s+skipped)?.*?in\s+([\d.]+)s?\s*=+'
+        # Pattern 1: Summary line with all components (most reliable)
+        # "=== 1 failed, 2 passed, 1 skipped, 3 errors in 3.45s ==="
+        # Note: errors are setup/teardown failures, not assertion failures
+        summary_pattern = r'=+\s*(?:(\d+)\s+failed.*?)?(\d+)\s+passed(?:.*?(\d+)\s+skipped)?(?:.*?(\d+)\s+errors?)?.*?in\s+([\d.]+)s?\s*=+'
         summary_match = re.search(summary_pattern, console_log)
 
         if summary_match:
-            results['failed'] = int(summary_match.group(1))
+            results['failed'] = int(summary_match.group(1) or 0)
             results['passed'] = int(summary_match.group(2))
             results['skipped'] = int(summary_match.group(3) or 0)
-            results['duration'] = summary_match.group(4)
-            results['total'] = results['passed'] + results['failed'] + results['skipped']
+            results['errors'] = int(summary_match.group(4) or 0)
+            results['duration'] = summary_match.group(5)
+            results['total'] = results['passed'] + results['failed'] + results['skipped'] + results['errors']
+            results['evidence_status'] = 'console'
+            results['evidence_sources'].append('console_summary')
         else:
-            # Pattern 2: Alternate summary format
+            # Pattern 2: Alternate summary format (all passed)
             # "=== 2 passed in 1.23s ==="
             alt_summary = r'=+\s*(\d+)\s+passed.*?in\s+([\d.]+)s?\s*=+'
             alt_match = re.search(alt_summary, console_log)
@@ -71,6 +81,12 @@ class PytestDefaultParser(BaseTestParser):
                 results['passed'] = int(alt_match.group(1))
                 results['duration'] = alt_match.group(2)
                 results['total'] = results['passed']
+                results['evidence_status'] = 'console'
+                results['evidence_sources'].append('console_summary')
+            else:
+                # No summary found
+                results['evidence_status'] = 'partial'
+                results['warnings'].append('No pytest summary line found in console output')
 
         # Extract individual test results
         # Pattern: "test_file.py::test_name PASSED/FAILED/SKIPPED [XX%]"
@@ -95,6 +111,19 @@ class PytestDefaultParser(BaseTestParser):
         # Extract failure details
         if results['failures']:
             results['failures'] = self._extract_failure_details(console_log, results['failures'])
+
+        # Detect "no tests collected" state
+        # This happens when tests exist but are all deselected by markers or filters
+        # Pattern: "=== N deselected in X.XXs ==="
+        deselected_only_pattern = r'=+\s*(\d+)\s+deselected\s+in\s+[\d.]+s?\s*=+'
+        deselected_match = re.search(deselected_only_pattern, console_log)
+
+        if deselected_match and results['total'] == 0:
+            # Only deselected tests, no actual execution
+            results['evidence_status'] = 'no_tests_collected'
+            results['warnings'].append(
+                f"{deselected_match.group(1)} tests were deselected - no actual test execution occurred"
+            )
 
         # Metadata
         results['metadata'] = {
@@ -162,21 +191,26 @@ class PytestDefaultParser(BaseTestParser):
         """
         Parse test results from artifact files (JUnit XML)
 
-        Example JUnit XML:
+        Supports both single testsuite and multiple testsuites formats:
+
+        Single suite:
         <testsuite name="pytest" tests="2" failures="1" skipped="0">
             <testcase classname="test_create_model" name="test_create_model_success" time="0.5"/>
-            <testcase classname="test_create_model" name="test_create_model_invalid" time="0.3">
-                <failure message="AssertionError: assert 422 == 200">
-                    [stack trace]
-                </failure>
-            </testcase>
+            ...
         </testsuite>
+
+        Multiple suites:
+        <testsuites>
+            <testsuite name="suite1" tests="10" failures="2" errors="1"/>
+            <testsuite name="suite2" tests="15" failures="1" errors="0"/>
+        </testsuites>
         """
         results = {
             'total': 0,
             'passed': 0,
             'failed': 0,
             'skipped': 0,
+            'errors': 0,
             'duration': None,
             'failures': []
         }
@@ -187,17 +221,28 @@ class PytestDefaultParser(BaseTestParser):
         try:
             root = ET.fromstring(artifact_content)
 
-            # Get testsuite element
-            testsuite = root if root.tag == 'testsuite' else root.find('.//testsuite')
+            # Handle both <testsuite> (single) and <testsuites> (multiple) root elements
+            # This fixes the bug where only the first suite was parsed
+            if root.tag == 'testsuites':
+                # Multiple suites - aggregate all
+                all_suites = root.findall('.//testsuite')
+            elif root.tag == 'testsuite':
+                # Single suite
+                all_suites = [root]
+            else:
+                # Unknown format
+                all_suites = []
 
-            if testsuite is not None:
-                results['total'] = int(testsuite.get('tests', 0))
-                results['failed'] = int(testsuite.get('failures', 0))
-                results['skipped'] = int(testsuite.get('skipped', 0))
-                results['passed'] = results['total'] - results['failed'] - results['skipped']
+            # Aggregate totals across ALL suites
+            for suite in all_suites:
+                results['total'] += int(suite.get('tests', 0))
+                results['failed'] += int(suite.get('failures', 0))
+                results['skipped'] += int(suite.get('skipped', 0))
+                results['errors'] += int(suite.get('errors', 0))
 
-                # Extract individual test cases
-                for testcase in testsuite.findall('.//testcase'):
+                # Extract individual test cases from each suite
+                for testcase in suite.findall('.//testcase'):
+                    # Check for failure
                     failure = testcase.find('failure')
                     if failure is not None:
                         results['failures'].append({
@@ -205,8 +250,24 @@ class PytestDefaultParser(BaseTestParser):
                             'test_name': testcase.get('name', 'unknown'),
                             'error_message': failure.get('message', 'No message'),
                             'stack_trace': failure.text or '',
-                            'duration': testcase.get('time', '0')
+                            'duration': testcase.get('time', '0'),
+                            'type': 'failure'
                         })
+
+                    # Check for error (setup/teardown failures)
+                    error = testcase.find('error')
+                    if error is not None:
+                        results['failures'].append({
+                            'test_file': testcase.get('classname', 'unknown') + '.py',
+                            'test_name': testcase.get('name', 'unknown'),
+                            'error_message': error.get('message', 'No message'),
+                            'stack_trace': error.text or '',
+                            'duration': testcase.get('time', '0'),
+                            'type': 'error'
+                        })
+
+            # Calculate passed count
+            results['passed'] = results['total'] - results['failed'] - results['skipped'] - results['errors']
 
         except ET.ParseError as e:
             print(f"Error parsing XML artifact: {e}")

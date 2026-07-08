@@ -8,11 +8,19 @@
   ],
   "jenkins": {
     "job_paths": [
-      "rhoai/3.4/selfmanaged/cli/aws/rhoai-sanity"
+      "rhoai/3.4/selfmanaged/cli/aws/rhoai-sanity",
+      "rhoai/autotrigger-smoke",
+      "odh/selfmanaged/cli/gcp/odh-tier2"
     ],
     "artifact_patterns": [
-      "**/ai-hub*.xml",
-      "**/model-registry*.xml"
+      "payload_results/ai-hub*.xml",
+      "**/model-registry*.xml",
+      "shiftleftArtifacts/ai-hub/xunit_report.xml"
+    ],
+    "test_suite_filter": "Ai Hub",
+    "cluster_log_patterns": [
+      "shiftleftArtifacts/ai-hub/setup/component-health/pytest-tests.log",
+      "shiftleftArtifacts/ai-hub/pytest-tests.log"
     ]
   },
   "test_framework": {

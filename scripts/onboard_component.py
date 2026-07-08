@@ -516,6 +516,13 @@ class {self._to_class_name(config['name'])}Parser(BaseTestParser):
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
+def run_onboarding_wizard():
+    """Run the interactive onboarding wizard (for use by unified CLI)"""
+    onboarder = ComponentOnboarder()
+    success = onboarder.run_interactive()
+    return 0 if success else 1
+
+
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
@@ -537,10 +544,7 @@ Examples:
 
     args = parser.parse_args()
 
-    onboarder = ComponentOnboarder()
-    success = onboarder.run_interactive()
-
-    sys.exit(0 if success else 1)
+    sys.exit(run_onboarding_wizard())
 
 
 if __name__ == '__main__':

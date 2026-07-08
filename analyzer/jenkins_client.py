@@ -76,11 +76,11 @@ class JenkinsClient:
     def _convert_job_path(self, job_path: str) -> str:
         """
         Convert job path to Jenkins API format
-        Input: "components/dashboard/dashboard-e2e-tests/dash-e2e-odh"
-        Output: "cypress/job/dashboard-tests/job/dash-e2e-odh"
+        Input: "odh/selfmanaged/cli/gcp/odh-tier2"
+        Output: "job/odh/job/selfmanaged/job/cli/job/gcp/job/odh-tier2"
         """
         path_parts = job_path.split("/")
-        return "/job/".join(path_parts)
+        return "job/" + "/job/".join(path_parts)
 
     async def get_job(self, job_path: str) -> Dict[str, Any]:
         """Get job details via direct HTTP API"""
@@ -135,6 +135,74 @@ class JenkinsClient:
         """List all artifacts for a build"""
         build_data = await self.get_build(job_path, build_number)
         return build_data.get('artifacts', [])
+
+    async def get_test_report(self, job_path: str, build_number: int) -> Optional[Dict[str, Any]]:
+        """
+        Get test report from Jenkins Test Report API
+
+        This is a secondary evidence source when XML artifacts are not available.
+        Returns aggregated test counts and failure details.
+
+        Args:
+            job_path: Jenkins job path (e.g., "rhoai/job/3.4/job/sanity")
+            build_number: Build number
+
+        Returns:
+            Dict with test report data, or None if not available
+
+        API format:
+        {
+            "failCount": 2,
+            "skipCount": 1,
+            "totalCount": 10,
+            "suites": [
+                {
+                    "cases": [
+                        {
+                            "name": "test_name",
+                            "className": "test_file",
+                            "status": "FAILED|PASSED|SKIPPED",
+                            "errorDetails": "...",
+                            "errorStackTrace": "...",
+                            "duration": 1.23
+                        }
+                    ]
+                }
+            ]
+        }
+        """
+        job_api_path = self._convert_job_path(job_path)
+        endpoint = f"{job_api_path}/{build_number}/testReport/api/json"
+
+        try:
+            async with httpx.AsyncClient(verify=self.ssl_verify, timeout=60.0) as client:
+                url = f"{self.jenkins_url}/{endpoint.lstrip('/')}"
+                print(f"      GET {url}")
+
+                if ':' in self.jenkins_token:
+                    username, token = self.jenkins_token.split(':', 1)
+                    auth = (username, token)
+                    response = await client.get(url, auth=auth)
+                else:
+                    response = await client.get(url, headers={'Authorization': f'Bearer {self.jenkins_token}'})
+
+                print(f"      HTTP {response.status_code}")
+                response.raise_for_status()
+                data = response.json()
+                print(f"      Found {data.get('totalCount', 0)} tests")
+                return data
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                # No test report available for this build
+                print(f"   ⓘ No test report found at {endpoint}")
+                return None
+            print(f"   ⚠️  Test Report API error (HTTP {e.response.status_code}): {e}")
+            return None
+        except Exception as e:
+            print(f"   ⚠️  Failed to fetch test report: {e}")
+            return None
+            return None
 
     async def find_nightly_builds(
         self,

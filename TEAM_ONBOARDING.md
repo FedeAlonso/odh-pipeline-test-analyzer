@@ -6,6 +6,30 @@ This platform enables RHOAI/ODH component teams to self-onboard and get automate
 
 ---
 
+## 📦 Installation
+
+### Option 1: Install as CLI Tool (Recommended)
+
+```bash
+# From the repository root
+pip install -e .
+
+# Verify installation
+rhoai-tfa --help
+```
+
+This installs the `rhoai-tfa` command globally in your Python environment.
+
+### Option 2: Use Scripts Directly
+
+```bash
+# No installation needed, just run from venv
+venv/bin/python scripts/onboard_component.py
+venv/bin/python scripts/analyze_component.py model-registry pytest --build 28
+```
+
+---
+
 ## 🎯 Quick Start
 
 ### 1. Onboard Your Component
@@ -13,6 +37,10 @@ This platform enables RHOAI/ODH component teams to self-onboard and get automate
 Run the interactive wizard:
 
 ```bash
+# Via unified CLI (recommended)
+rhoai-tfa component onboard
+
+# Or directly
 python3 scripts/onboard_component.py
 ```
 
@@ -37,11 +65,19 @@ Provide:
 ### 2. Run Analysis
 
 ```bash
+# Via unified CLI (recommended)
+rhoai-tfa analyze {component} --framework={framework} --build={number}
+
+# Or directly
 python3 scripts/analyze_component.py {component} {framework} --build {number}
 ```
 
 **Example:**
 ```bash
+# Via unified CLI
+rhoai-tfa analyze model-registry --framework=pytest --build=28
+
+# Or directly
 python3 scripts/analyze_component.py model-registry pytest --build 28
 ```
 
@@ -502,24 +538,37 @@ python3 scripts/analyze_component.py model-registry pytest --build 28
 ### List All Components
 
 ```bash
+# Via unified CLI (recommended)
+rhoai-tfa component list
+
+# Or directly
 python3 scripts/component_cli.py list
 ```
 
 ### Show Component Details
 
 ```bash
+# Via unified CLI
+rhoai-tfa component show {component} --framework={framework}
+
+# Or directly
 python3 scripts/component_cli.py show {component} {framework}
 ```
 
 ### Validate Configuration
 
 ```bash
+# Via unified CLI
+rhoai-tfa component validate {component} --framework={framework}
+
+# Or directly
 python3 scripts/component_cli.py validate {component} {framework}
 ```
 
 ### Discover Components
 
 ```bash
+# Only available via direct script
 python3 scripts/component_cli.py discover
 ```
 

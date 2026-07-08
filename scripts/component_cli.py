@@ -16,8 +16,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from analyzer.registry import ComponentRegistry
 
 
-def list_components(registry: ComponentRegistry, output_format: str = 'table'):
+def list_components(output_format: str = 'table'):
     """List all discovered components"""
+    registry = ComponentRegistry()
     components = registry.list_components()
 
     if not components:
@@ -44,8 +45,9 @@ def list_components(registry: ComponentRegistry, output_format: str = 'table'):
     print(f"\nTotal: {len(components)} components\n")
 
 
-def show_component(registry: ComponentRegistry, component_name: str, framework: str):
+def show_component(component_name: str, framework: str = None):
     """Show detailed information about a component"""
+    registry = ComponentRegistry()
     config = registry.get_component(component_name, framework)
 
     if not config:
@@ -83,8 +85,9 @@ def show_component(registry: ComponentRegistry, component_name: str, framework: 
     print(f"\n{'=' * 80}\n")
 
 
-def validate_component(registry: ComponentRegistry, component_name: str, framework: str):
+def validate_component(component_name: str, framework: str = None):
     """Validate a component configuration"""
+    registry = ComponentRegistry()
     print(f"\nValidating {component_name}/{framework}...")
 
     is_valid, errors = registry.validate_component(component_name, framework)
@@ -225,11 +228,11 @@ Examples:
 
     # Execute command
     if args.command == 'list':
-        list_components(registry, args.format)
+        list_components(args.format)
     elif args.command == 'show':
-        show_component(registry, args.component, args.framework)
+        show_component(args.component, args.framework)
     elif args.command == 'validate':
-        validate_component(registry, args.component, args.framework)
+        validate_component(args.component, args.framework)
     elif args.command == 'find-job':
         find_components_for_job(registry, args.job_path)
     elif args.command == 'stats':
