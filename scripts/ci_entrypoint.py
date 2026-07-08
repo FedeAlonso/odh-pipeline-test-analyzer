@@ -174,13 +174,19 @@ def extract_cluster_api_url(build_number: str) -> str:
         job_path = "components/dashboard/dashboard-e2e-tests"
         api_path = "/job/".join(job_path.split("/"))
         url = f"{jenkins_url}/job/{api_path}/{build_number}/consoleText"
+        ssl_verify = os.getenv("SSL_VERIFY", "true").lower() == "true"
         resp = httpx.get(
             url,
             auth=(jenkins_user, jenkins_token),
             timeout=30,
-            verify=os.getenv("SSL_VERIFY", "true").lower() == "true",
+            verify=ssl_verify,
             headers={"Range": "bytes=0-50000"},
         )
+        if resp.status_code == 401:
+            resp = httpx.get(
+                url, timeout=30, verify=ssl_verify,
+                headers={"Range": "bytes=0-50000"},
+            )
         if resp.status_code not in (200, 206):
             return ""
 
