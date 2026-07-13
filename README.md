@@ -125,6 +125,147 @@ TRACER_PATH=/path/to/tracer/tracer.sh
    **Note**: The Red Hat internal MCP server currently has bugs preventing job access.
    Direct HTTP API is recommended and works reliably. See `MCP_STATUS.md` for details.
 
+## MCP Server Integrations
+
+The analyzer agent uses [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) servers to interact with Slack, Kubernetes clusters, and Jenkins. These run locally alongside Claude Code and are configured in `~/.claude.json`.
+
+### Slack MCP Server
+
+**Source:** [redhat-community-ai-tools/slack-mcp](https://github.com/redhat-community-ai-tools/slack-mcp)
+
+Enables the agent to search Slack messages, read thread replies, post analysis summaries as threaded replies on Jenkins Bot notifications, and browse channel history. Anyone can set this up locally.
+
+**Setup:**
+
+1. Get your Slack session tokens (`xoxc` and `xoxd`) from your browser's cookies on the Slack web app.
+
+2. Run the MCP server via podman (or docker):
+```bash
+podman run -i --rm \
+  -e SLACK_XOXC_TOKEN="xoxc-your-token" \
+  -e SLACK_XOXD_TOKEN="xoxd-your-token" \
+  -e MCP_TRANSPORT=stdio \
+  quay.io/redhat-ai-tools/slack-mcp
+```
+
+3. Add to `~/.claude.json`:
+```json
+{
+  "mcpServers": {
+    "slack": {
+      "type": "stdio",
+      "command": "podman",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "SLACK_XOXC_TOKEN=xoxc-your-token",
+        "-e", "SLACK_XOXD_TOKEN=xoxd-your-token",
+        "-e", "MCP_TRANSPORT=stdio",
+        "quay.io/redhat-ai-tools/slack-mcp"
+      ]
+    }
+  }
+}
+```
+
+**Available tools:**
+
+| Tool | Purpose |
+|------|---------|
+| `mcp__slack__search_messages` | Search across Slack channels |
+| `mcp__slack__search_channel_messages` | Search within a specific channel |
+| `mcp__slack__get_thread` | Fetch all replies in a thread |
+| `mcp__slack__get_channel_history` | Browse channel history with date filters |
+| `mcp__slack__post_message` | Post a message (supports `thread_ts` for threading) |
+| `mcp__slack__send_dm` | Send a direct message |
+| `mcp__slack__add_reaction` | Add an emoji reaction |
+
+**Notes:**
+- `xoxc`/`xoxd` tokens are browser session tokens that expire periodically. Re-extract them from your browser when they stop working.
+- In CI containers, Slack is **disabled by default** (`SKIP_SLACK=true`) because session tokens are short-lived. Set `SKIP_SLACK=false` and provide `SLACK_XOXC_TOKEN`/`SLACK_XOXD_TOKEN` env vars to override.
+- See the [slack-mcp README](https://github.com/redhat-community-ai-tools/slack-mcp) for detailed setup instructions and token extraction guides.
+
+### Kubernetes / OpenShift MCP Server
+
+**Source:** [openshift/openshift-mcp-server](https://github.com/openshift/openshift-mcp-server) (npm: `kubernetes-mcp-server`)
+
+Provides direct access to Kubernetes/OpenShift clusters — list pods, read logs, check events, inspect any resource. Replaces most `oc` CLI read operations and also supports write operations (create, delete, scale, exec).
+
+**Setup:**
+
+1. Install the server:
+```bash
+npm install -g kubernetes-mcp-server
+```
+
+2. Ensure you have a valid kubeconfig (created by `oc login`):
+```bash
+oc login -u <username> -p <password> --server=<api-server> --insecure-skip-tls-verify
+```
+
+3. Add to `~/.claude.json`:
+```json
+{
+  "mcpServers": {
+    "kubernetes-mcp-server": {
+      "command": "kubernetes-mcp-server",
+      "args": [],
+      "env": {
+        "KUBECONFIG": "/path/to/.kube/config"
+      }
+    }
+  }
+}
+```
+
+**Key tools:**
+
+| Tool | Purpose | Replaces |
+|------|---------|----------|
+| `pods_list` / `pods_list_in_namespace` | List pods across or within namespaces | `oc get pods` |
+| `pods_get` | Get pod details (status, containers, conditions) | `oc get pod -o json` |
+| `pods_log` | Get pod logs (container, tail, previous) | `oc logs` |
+| `pods_top` / `nodes_top` | CPU/memory metrics | `oc adm top` |
+| `events_list` | Cluster events (warnings, errors) | `oc get events` |
+| `resources_get` / `resources_list` | Get/list any resource by apiVersion/kind | `oc get <resource>` |
+| `namespaces_list` / `projects_list` | List namespaces or OpenShift projects | `oc get projects` |
+
+**Notes:**
+- Uses `~/.kube/config` with the current context. Use the `context` parameter on any tool call to target a different cluster without switching contexts.
+- In CI containers, auto-configured by `scripts/ci_entrypoint.py` when a kubeconfig is mounted (`-v ~/.kube/config:/opt/app-root/src/.kube/config:ro`).
+- Write operations (create, delete, scale, exec) are available but use with caution.
+
+### Jenkins MCP Server (Project-Provided)
+
+**Location:** `mcp/server.py`
+
+This project includes its own MCP server that **exposes** Jenkins tools to external AI agents. This is not consumed by the analyzer itself (which uses direct HTTP API calls) — it's for other tools or agents that want to interact with Jenkins via MCP protocol.
+
+**Setup:**
+
+```bash
+# Run directly
+python mcp/server.py
+
+# Or via container
+podman build -f Containerfile -t jenkins-mcp .
+podman run -i --rm \
+  -e JENKINS_URL=https://your-jenkins.example.com \
+  -e JENKINS_TOKEN=your-token \
+  jenkins-mcp
+```
+
+**Exposed tools:**
+
+| Tool | Purpose |
+|------|---------|
+| `getAllJobs` | List all Jenkins jobs |
+| `getJob` | Get details of a specific job |
+| `getBuild` | Get build details (status, duration, result) |
+| `getBuildLog` | Get build console output with pagination |
+| `triggerBuild` | Trigger a new build |
+
+**Credentials:** `JENKINS_URL` + `JENKINS_TOKEN` (env vars). Supports both Bearer token and Basic Auth (`user:password` format).
+
 ## Usage
 
 ### 🤖 Quick Start for Claude Agents
