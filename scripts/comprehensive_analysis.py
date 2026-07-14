@@ -114,7 +114,7 @@ def get_image_metadata_with_tracer(image_uri: str) -> dict:
 
     try:
         result = subprocess.run(
-            [tracer_path, '-i', image_uri, '-c'],
+            ['bash', tracer_path, '-i', image_uri, '-c'],
             capture_output=True,
             text=True,
             timeout=60
@@ -1324,6 +1324,7 @@ def generate_html_report(
     stage_timeout_minutes, results_by_stage, test_stages_ran,
     analysis_with_reruns, cluster_analysis, recent_merges, git_analysis,
     all_tests_by_stage=None, version_mismatch=None, cluster_image_ages=None,
+    lock_ticket_key=None,
 ) -> str:
     import html as html_mod
     esc = html_mod.escape
@@ -1421,10 +1422,15 @@ def generate_html_report(
                 artifacts_html += f'<div class="artifact-section"><div class="artifact-title">Screenshots</div><div class="artifact-grid">{"".join(imgs)}</div></div>'
 
             if video_local:
+                video_url = getattr(f, "_video_url", None)
+                video_src = video_url or video_local
                 artifacts_html += (
                     f'<div class="artifact-section"><div class="artifact-title">Video</div>'
-                    f'<video controls preload="none" class="artifact-video"><source src="{esc(video_local)}" type="video/mp4"></video></div>'
+                    f'<video controls preload="none" class="artifact-video"><source src="{esc(video_src)}" type="video/mp4"></video>'
                 )
+                if video_url:
+                    artifacts_html += f'<div class="artifact-label"><a href="{esc(video_url)}" target="_blank">Open video in Jenkins</a></div>'
+                artifacts_html += '</div>'
 
             if err_msg:
                 artifacts_html += f'<div class="artifact-section"><div class="artifact-title">Error</div><pre class="code-block">{esc(err_msg[:2000])}</pre></div>'
@@ -1730,7 +1736,10 @@ def generate_html_report(
                 )
             media_block += f'<details open><summary>Screenshots ({len(valid_screenshots)})</summary><div class="artifact-grid">{"".join(imgs)}</div></details>'
         if video_local:
-            media_block += f'<details><summary>Video</summary><video controls preload="none" class="artifact-video"><source src="{esc(video_local)}" type="video/mp4"></video></details>'
+            video_url = getattr(f, "_video_url", None)
+            video_src = video_url or video_local
+            video_link = f'<div class="artifact-label"><a href="{esc(video_url)}" target="_blank">Open video in Jenkins</a></div>' if video_url else ''
+            media_block += f'<details><summary>Video</summary><video controls preload="none" class="artifact-video"><source src="{esc(video_src)}" type="video/mp4"></video>{video_link}</details>'
 
         card_status = "retry" if is_rp else "failed"
         failure_cards.append(f"""
@@ -1941,6 +1950,7 @@ th {{ background:var(--bg2); color:var(--text2); font-weight:600; text-transform
   <h1>{esc(name)} E2E Analysis &mdash; Build #{build_num} <span class="badge {status_cls}">{status_label}</span></h1>
   <div class="header-meta">
     {now} &nbsp;|&nbsp; <a href="{esc(build_url)}">Jenkins Build</a>
+    {f'&nbsp;|&nbsp; <a href="https://redhat.atlassian.net/browse/{esc(lock_ticket_key)}">{esc(lock_ticket_key)}</a>' if lock_ticket_key else ""}
     {"&nbsp;|&nbsp; Nightly: " + esc(nightly_info.get("cluster_name","")) if nightly_info.get("is_nightly") else ""}
   </div>
 </div>
@@ -2760,6 +2770,11 @@ async def main():
             jira_enabled, lock_ticket_key = await check_or_create_lock(build_num, name, build_date_str, auto_yes=auto_yes)
         except Exception as e:
             print(f"⚠️  Jira lock check failed ({e}). Continuing without lock...")
+    if lock_ticket_key:
+        try:
+            Path("/app/jira-ticket.txt").write_text(lock_ticket_key)
+        except Exception:
+            pass
     if skip_slack:
         print("⏭️  Skipping Slack (--skip-slack)")
     if skip_rerun:
@@ -3066,6 +3081,15 @@ async def main():
     console_stages = sorted(set(stage_pattern.findall(console_output)))
 
     artifacts = await jenkins_cli.list_artifacts(job_path, build_num)
+    if not artifacts:
+        print(f"\n   ❌ No artifacts found for build #{build_num}.")
+        print(f"   Cannot perform a proper analysis without build artifacts (JUnit XML, screenshots, videos).")
+        print(f"   Artifacts may have been deleted from Jenkins or the build may still be in progress.")
+        print(f"\n{'='*100}")
+        print(f"❌ ANALYSIS ABORTED — No artifacts available for build #{build_num}")
+        print(f"{'='*100}")
+        sys.exit(1)
+
     artifact_stages = set()
     for artifact in artifacts:
         m = stage_pattern.search(artifact.get('relativePath', ''))
@@ -3531,6 +3555,7 @@ async def main():
                     with open(vid_local_path, 'wb') as vf:
                         vf.write(vid_bytes)
                     failure._video_local = f"videos/{vid_filename}"
+                    failure._video_url = f"{jenkins_cli.jenkins_url}/job/{job_path.replace('/', '/job/')}/{build_num}/artifact/{video_rel}"
                 except Exception:
                     pass
 
@@ -4374,6 +4399,7 @@ async def main():
         cluster_analysis=cluster_analysis, recent_merges=recent_merges, git_analysis=git_analysis,
         all_tests_by_stage=all_tests_by_stage, version_mismatch=version_mismatch,
         cluster_image_ages=cluster_image_ages,
+        lock_ticket_key=lock_ticket_key,
     )
     html_report_path = f"reports/current/{name}/latest-build-{build_num}.html"
     with open(html_report_path, 'w') as f:

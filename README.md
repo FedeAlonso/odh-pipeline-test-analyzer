@@ -125,6 +125,147 @@ TRACER_PATH=/path/to/tracer/tracer.sh
    **Note**: The Red Hat internal MCP server currently has bugs preventing job access.
    Direct HTTP API is recommended and works reliably. See `MCP_STATUS.md` for details.
 
+## MCP Server Integrations
+
+The analyzer agent uses [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) servers to interact with Slack, Kubernetes clusters, and Jenkins. These run locally alongside Claude Code and are configured in `~/.claude.json`.
+
+### Slack MCP Server
+
+**Source:** [redhat-community-ai-tools/slack-mcp](https://github.com/redhat-community-ai-tools/slack-mcp)
+
+Enables the agent to search Slack messages, read thread replies, post analysis summaries as threaded replies on Jenkins Bot notifications, and browse channel history. Anyone can set this up locally.
+
+**Setup:**
+
+1. Get your Slack session tokens (`xoxc` and `xoxd`) from your browser's cookies on the Slack web app.
+
+2. Run the MCP server via podman (or docker):
+```bash
+podman run -i --rm \
+  -e SLACK_XOXC_TOKEN="xoxc-your-token" \
+  -e SLACK_XOXD_TOKEN="xoxd-your-token" \
+  -e MCP_TRANSPORT=stdio \
+  quay.io/redhat-ai-tools/slack-mcp
+```
+
+3. Add to `~/.claude.json`:
+```json
+{
+  "mcpServers": {
+    "slack": {
+      "type": "stdio",
+      "command": "podman",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "SLACK_XOXC_TOKEN=xoxc-your-token",
+        "-e", "SLACK_XOXD_TOKEN=xoxd-your-token",
+        "-e", "MCP_TRANSPORT=stdio",
+        "quay.io/redhat-ai-tools/slack-mcp"
+      ]
+    }
+  }
+}
+```
+
+**Available tools:**
+
+| Tool | Purpose |
+|------|---------|
+| `mcp__slack__search_messages` | Search across Slack channels |
+| `mcp__slack__search_channel_messages` | Search within a specific channel |
+| `mcp__slack__get_thread` | Fetch all replies in a thread |
+| `mcp__slack__get_channel_history` | Browse channel history with date filters |
+| `mcp__slack__post_message` | Post a message (supports `thread_ts` for threading) |
+| `mcp__slack__send_dm` | Send a direct message |
+| `mcp__slack__add_reaction` | Add an emoji reaction |
+
+**Notes:**
+- `xoxc`/`xoxd` tokens are browser session tokens that expire periodically. Re-extract them from your browser when they stop working.
+- In CI containers, Slack is **disabled by default** (`SKIP_SLACK=true`) because session tokens are short-lived. Set `SKIP_SLACK=false` and provide `SLACK_XOXC_TOKEN`/`SLACK_XOXD_TOKEN` env vars to override.
+- See the [slack-mcp README](https://github.com/redhat-community-ai-tools/slack-mcp) for detailed setup instructions and token extraction guides.
+
+### Kubernetes / OpenShift MCP Server
+
+**Source:** [openshift/openshift-mcp-server](https://github.com/openshift/openshift-mcp-server) (npm: `kubernetes-mcp-server`)
+
+Provides direct access to Kubernetes/OpenShift clusters — list pods, read logs, check events, inspect any resource. Replaces most `oc` CLI read operations and also supports write operations (create, delete, scale, exec).
+
+**Setup:**
+
+1. Install the server:
+```bash
+npm install -g kubernetes-mcp-server
+```
+
+2. Ensure you have a valid kubeconfig (created by `oc login`):
+```bash
+oc login -u <username> -p <password> --server=<api-server> --insecure-skip-tls-verify
+```
+
+3. Add to `~/.claude.json`:
+```json
+{
+  "mcpServers": {
+    "kubernetes-mcp-server": {
+      "command": "kubernetes-mcp-server",
+      "args": [],
+      "env": {
+        "KUBECONFIG": "/path/to/.kube/config"
+      }
+    }
+  }
+}
+```
+
+**Key tools:**
+
+| Tool | Purpose | Replaces |
+|------|---------|----------|
+| `pods_list` / `pods_list_in_namespace` | List pods across or within namespaces | `oc get pods` |
+| `pods_get` | Get pod details (status, containers, conditions) | `oc get pod -o json` |
+| `pods_log` | Get pod logs (container, tail, previous) | `oc logs` |
+| `pods_top` / `nodes_top` | CPU/memory metrics | `oc adm top` |
+| `events_list` | Cluster events (warnings, errors) | `oc get events` |
+| `resources_get` / `resources_list` | Get/list any resource by apiVersion/kind | `oc get <resource>` |
+| `namespaces_list` / `projects_list` | List namespaces or OpenShift projects | `oc get projects` |
+
+**Notes:**
+- Uses `~/.kube/config` with the current context. Use the `context` parameter on any tool call to target a different cluster without switching contexts.
+- In CI containers, auto-configured by `scripts/ci_entrypoint.py` when a kubeconfig is mounted (`-v ~/.kube/config:/opt/app-root/src/.kube/config:ro`).
+- Write operations (create, delete, scale, exec) are available but use with caution.
+
+### Jenkins MCP Server (Project-Provided)
+
+**Location:** `mcp/server.py`
+
+This project includes its own MCP server that **exposes** Jenkins tools to external AI agents. This is not consumed by the analyzer itself (which uses direct HTTP API calls) — it's for other tools or agents that want to interact with Jenkins via MCP protocol.
+
+**Setup:**
+
+```bash
+# Run directly
+python mcp/server.py
+
+# Or via container
+podman build -f Containerfile -t jenkins-mcp .
+podman run -i --rm \
+  -e JENKINS_URL=https://your-jenkins.example.com \
+  -e JENKINS_TOKEN=your-token \
+  jenkins-mcp
+```
+
+**Exposed tools:**
+
+| Tool | Purpose |
+|------|---------|
+| `getAllJobs` | List all Jenkins jobs |
+| `getJob` | Get details of a specific job |
+| `getBuild` | Get build details (status, duration, result) |
+| `getBuildLog` | Get build console output with pagination |
+| `triggerBuild` | Trigger a new build |
+
+**Credentials:** `JENKINS_URL` + `JENKINS_TOKEN` (env vars). Supports both Bearer token and Basic Auth (`user:password` format).
+
 ## Usage
 
 ### 🤖 Quick Start for Claude Agents
@@ -573,6 +714,187 @@ async def your_new_check(self, namespace: str) -> Dict[str, Any]:
     result = await self._run_oc_command('get', 'resource', '-n', namespace)
     return result
 ```
+
+## CI / Container Integration
+
+The analyzer can run inside a container as a post-build step in the `dashboard-e2e-tests` Jenkins pipeline ([RHOAIENG-71238](https://redhat.atlassian.net/browse/RHOAIENG-71238)).
+
+### Container images
+
+| Containerfile | Purpose |
+|---------------|---------|
+| `Containerfile` | MCP server only (`mcp/server.py`) |
+| `Containerfile.ci` | Full analysis pipeline + Claude Code agent for deep analysis |
+
+The CI image (~2 GB) includes: Python 3.11, `oc` CLI, `gh` CLI, Node.js 20, Claude Code CLI, and all Python dependencies. It supports both `amd64` and `arm64` architectures.
+
+### Prerequisites
+
+The UBI9 base image requires a Red Hat registry login:
+
+```bash
+podman login registry.redhat.io
+```
+
+### Building the image
+
+```bash
+podman build -f Containerfile.ci -t pipeline-test-analyzer .
+```
+
+The first build takes ~5 minutes (downloads CLIs, Node.js, Claude Code, Python deps). Subsequent builds use layer caching and are fast — source code changes only rebuild the final `COPY` layers (~10 seconds).
+
+### Running the analyzer
+
+All examples assume a `.env` file with Jenkins, Jira, and cluster credentials (see `env.template`).
+
+**Quick analysis — automated only, no AI, no external posting:**
+
+```bash
+podman run --rm \
+    --env-file .env \
+    -e BUILD_NUMBER=1571 \
+    -e PRODUCT=rhoai \
+    -e SKIP_DEEP_ANALYSIS=true \
+    -e SKIP_JIRA=true \
+    -e SKIP_SLACK=true \
+    -v ./reports:/app/reports:Z \
+    pipeline-test-analyzer
+```
+
+**Full workflow with Vertex AI auth (Red Hat internal):**
+
+```bash
+podman run --rm \
+    --network=host \
+    --env-file .env \
+    -e BUILD_NUMBER=1571 \
+    -e PRODUCT=rhoai \
+    -e CLAUDE_CODE_USE_VERTEX=1 \
+    -e ANTHROPIC_VERTEX_PROJECT_ID=$ANTHROPIC_VERTEX_PROJECT_ID \
+    -e CLOUD_ML_REGION=$CLOUD_ML_REGION \
+    -v ~/.config/gcloud:/opt/app-root/src/.config/gcloud:ro \
+    -v ./reports:/app/reports:Z \
+    pipeline-test-analyzer
+```
+
+**Full workflow with Anthropic API key:**
+
+```bash
+podman run --rm \
+    --env-file .env \
+    -e BUILD_NUMBER=1571 \
+    -e PRODUCT=rhoai \
+    -e ANTHROPIC_API_KEY=sk-ant-... \
+    -v ./reports:/app/reports:Z \
+    pipeline-test-analyzer
+```
+
+**Analyze the latest ODH build, skip test reruns:**
+
+```bash
+podman run --rm \
+    --env-file .env \
+    -e BUILD_NUMBER=latest \
+    -e PRODUCT=odh \
+    -e SKIP_DEEP_ANALYSIS=true \
+    -e SKIP_RERUN=true \
+    -v ./reports:/app/reports:Z \
+    pipeline-test-analyzer
+```
+
+**Analysis + Jira publishing, no Slack, no AI:**
+
+```bash
+podman run --rm \
+    --env-file .env \
+    -e BUILD_NUMBER=1571 \
+    -e PRODUCT=rhoai \
+    -e SKIP_DEEP_ANALYSIS=true \
+    -e SKIP_SLACK=true \
+    -v ./reports:/app/reports:Z \
+    pipeline-test-analyzer
+```
+
+### Getting the reports
+
+Reports are generated inside the container at `/app/reports/`. Mount a local volume with `-v ./reports:/app/reports:Z` to persist them:
+
+- `reports/current/RHOAI/latest-build-{N}.html` — self-contained HTML with embedded screenshots
+- `reports/current/RHOAI/latest-build-{N}.md` — markdown version
+- `reports/historical/{date}-{variant}-build-{N}-v2.md` — timestamped archive
+
+Without the volume mount, reports are lost when the container exits.
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `BUILD_NUMBER` | Yes | Jenkins build number or `latest` |
+| `PRODUCT` | Yes | `rhoai` or `odh` |
+| `SKIP_DEEP_ANALYSIS` | No | Set to `true` to skip Claude Code agent step |
+| `SKIP_JIRA` | No | Set to `true` to skip Jira lock ticket and publishing |
+| `SKIP_SLACK` | No | Defaults to skipped in CI (see note below). Set to `false` to enable |
+| `SKIP_RERUN` | No | Set to `true` to skip test reruns |
+
+**Claude API auth** (required unless `SKIP_DEEP_ANALYSIS=true`) — use one of:
+
+| Variable | Auth method | Description |
+|----------|-------------|-------------|
+| `ANTHROPIC_API_KEY` | Direct API | Anthropic API key (`sk-ant-...`) |
+| `CLAUDE_CODE_USE_VERTEX` | Vertex AI | Set to `1` |
+| `ANTHROPIC_VERTEX_PROJECT_ID` | Vertex AI | GCP project ID |
+| `CLOUD_ML_REGION` | Vertex AI | GCP region (e.g. `us-east5`) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Vertex AI | Path to service account JSON key (for Jenkins/CI) |
+
+For Vertex AI, mount GCP credentials into the container:
+- **Local development**: `-v ~/.config/gcloud:/opt/app-root/src/.config/gcloud:ro`
+- **Jenkins/CI**: mount a service account key and set `GOOGLE_APPLICATION_CREDENTIALS`
+
+**Slack** — disabled by default in CI. The Slack MCP server uses browser session tokens (`xoxc`/`xoxd`) that expire frequently and cannot be refreshed programmatically, making them unsuitable for automated pipelines. Slack posting is handled by the interactive Claude Code agent when running locally. To force-enable in CI, set `SKIP_SLACK=false` and provide the tokens:
+
+| Variable | Description |
+|----------|-------------|
+| `SLACK_XOXC_TOKEN` | Slack session token (xoxc-...) |
+| `SLACK_XOXD_TOKEN` | Slack session token (xoxd-...) |
+
+**Kubernetes MCP** (automatic if kubeconfig is mounted):
+
+Mount `~/.kube/config` into the container: `-v ~/.kube/config:/opt/app-root/src/.kube/config:ro`
+
+**Network**: Use `--network=host` if the Jenkins/Jira/cluster servers are on a VPN or internal DNS that the container's default network can't resolve.
+
+All other env vars from `env.template` (Jenkins, Jira, cluster credentials, etc.) are also supported and passed through to the analysis scripts.
+
+### Debugging
+
+Shell into the container to troubleshoot:
+
+```bash
+podman run --rm -it \
+    --env-file .env \
+    --entrypoint /bin/bash \
+    pipeline-test-analyzer
+```
+
+Then verify the tools:
+
+```bash
+oc version --client     # OpenShift CLI
+gh --version            # GitHub CLI
+claude --version        # Claude Code CLI
+python --version        # Python runtime
+python scripts/ci_entrypoint.py   # Run manually
+```
+
+### Architecture
+
+The CI entry point (`scripts/ci_entrypoint.py`) runs two phases:
+
+1. **Phase 1 — Automated analysis**: runs `comprehensive_analysis.py` with `-y --enable-trend`
+2. **Phase 2 — Deep analysis**: invokes Claude Code CLI headless for failure investigation, Jira comments, and Slack thread posting (skippable with `SKIP_DEEP_ANALYSIS=true`)
+
+If `FRONTEND_REPO_PATH` is not set, the entry point auto-clones `odh-dashboard` into `/workspace/`.
 
 ## Related Projects
 

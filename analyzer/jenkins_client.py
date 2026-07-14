@@ -35,39 +35,35 @@ class JenkinsClient:
         # Always use direct HTTP API
         print(f"✓ Jenkins client initialized (SSL verify: {self.ssl_verify})")
 
+    async def _request(self, url: str, client: httpx.AsyncClient) -> httpx.Response:
+        """Send a GET request with auth, retrying without auth on 401 (anonymous fallback)."""
+        if ':' in self.jenkins_token:
+            username, token = self.jenkins_token.split(':', 1)
+            response = await client.get(url, auth=(username, token))
+        else:
+            response = await client.get(
+                url, headers={"Authorization": f"Bearer {self.jenkins_token}"}
+            )
+
+        if response.status_code == 401:
+            print("⚠️  Auth returned 401, falling back to anonymous access")
+            response = await client.get(url)
+
+        response.raise_for_status()
+        return response
+
     async def _fetch_text_direct(self, endpoint: str) -> str:
         """Fetch text content directly from Jenkins (for logs and artifacts)"""
         async with httpx.AsyncClient(verify=self.ssl_verify, timeout=120.0) as client:
             url = f"{self.jenkins_url}/{endpoint.lstrip('/')}"
-
-            # Use Basic Auth with username:token format
-            # jenkins_token is in "username:token" format if username/password were provided
-            if ':' in self.jenkins_token:
-                username, token = self.jenkins_token.split(':', 1)
-                auth = (username, token)
-                response = await client.get(url, auth=auth)
-            else:
-                # Fallback to Bearer token (legacy)
-                headers = {
-                    "Authorization": f"Bearer {self.jenkins_token}",
-                }
-                response = await client.get(url, headers=headers)
-
-            response.raise_for_status()
+            response = await self._request(url, client)
             return response.text
 
     async def _fetch_bytes_direct(self, endpoint: str) -> bytes:
         """Fetch binary content directly from Jenkins (for images, videos)"""
         async with httpx.AsyncClient(verify=self.ssl_verify, timeout=120.0) as client:
             url = f"{self.jenkins_url}/{endpoint.lstrip('/')}"
-            if ':' in self.jenkins_token:
-                username, token = self.jenkins_token.split(':', 1)
-                auth = (username, token)
-                response = await client.get(url, auth=auth)
-            else:
-                headers = {"Authorization": f"Bearer {self.jenkins_token}"}
-                response = await client.get(url, headers=headers)
-            response.raise_for_status()
+            response = await self._request(url, client)
             return response.content
 
     async def get_artifact_bytes(self, job_path: str, build_number: int, artifact_path: str) -> bytes:
@@ -91,19 +87,10 @@ class JenkinsClient:
         path_parts = job_path.split("/")
         jenkins_path = "/".join([f"job/{part}" for part in path_parts])
         endpoint = f"{jenkins_path}/api/json"
-        
+
         async with httpx.AsyncClient(verify=self.ssl_verify, timeout=120.0) as client:
             url = f"{self.jenkins_url}/{endpoint}"
-            
-            if ':' in self.jenkins_token:
-                username, token = self.jenkins_token.split(':', 1)
-                auth = (username, token)
-                response = await client.get(url, auth=auth)
-            else:
-                headers = {"Authorization": f"Bearer {self.jenkins_token}"}
-                response = await client.get(url, headers=headers)
-            
-            response.raise_for_status()
+            response = await self._request(url, client)
             return response.json()
 
     async def get_build(self, job_path: str, build_number: Optional[int] = None) -> Dict[str, Any]:
@@ -123,17 +110,7 @@ class JenkinsClient:
 
         async with httpx.AsyncClient(verify=self.ssl_verify, timeout=120.0) as client:
             url = f"{self.jenkins_url}/{endpoint}"
-
-            # Use Basic Auth
-            if ':' in self.jenkins_token:
-                username, token = self.jenkins_token.split(':', 1)
-                auth = (username, token)
-                response = await client.get(url, auth=auth)
-            else:
-                headers = {"Authorization": f"Bearer {self.jenkins_token}"}
-                response = await client.get(url, headers=headers)
-
-            response.raise_for_status()
+            response = await self._request(url, client)
             return response.json()
 
     async def get_build_log(self, job_path: str, build_number: Optional[int] = None) -> str:
