@@ -110,7 +110,7 @@ COPY .claude/settings.json ./.claude/settings.json
 COPY .claude/settings.ci.json ./.claude/settings.local.json
 
 # Skopeo auth storage (writable by non-root user for tracer's skopeo login)
-RUN mkdir -p /run/containers && chmod 777 /run/containers
+RUN mkdir -p /run/containers && chmod 775 /run/containers
 
 # Reports directory
 RUN mkdir -p reports/current/RHOAI reports/current/ODH reports/historical

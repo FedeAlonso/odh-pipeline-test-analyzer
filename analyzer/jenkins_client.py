@@ -46,6 +46,7 @@ class JenkinsClient:
             )
 
         if response.status_code == 401:
+            print("⚠️  Auth returned 401, falling back to anonymous access")
             response = await client.get(url)
 
         response.raise_for_status()

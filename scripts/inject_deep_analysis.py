@@ -212,7 +212,8 @@ def upload_to_jira(ticket_key: str, files: list[Path]):
     auth = (jira_user, jira_token)
     filenames = {f.name for f in files}
 
-    with httpx.Client(verify=False, timeout=120.0) as client:
+    ssl_verify = os.getenv("SSL_VERIFY", "true").lower() == "true"
+    with httpx.Client(verify=ssl_verify, timeout=120.0) as client:
         # Get existing attachments
         resp = client.get(
             f"{jira_url}/rest/api/3/issue/{ticket_key}?fields=attachment",
