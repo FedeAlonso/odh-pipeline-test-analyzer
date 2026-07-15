@@ -202,7 +202,6 @@ class JenkinsClient:
         except Exception as e:
             print(f"   ⚠️  Failed to fetch test report: {e}")
             return None
-            return None
 
     async def find_nightly_builds(
         self,

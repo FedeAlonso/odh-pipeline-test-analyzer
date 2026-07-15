@@ -57,36 +57,32 @@ class PytestDefaultParser(BaseTestParser):
             results['warnings'].append('No console output available')
             return results
 
-        # Pattern 1: Summary line with all components (most reliable)
-        # "=== 1 failed, 2 passed, 1 skipped, 3 errors in 3.45s ==="
-        # Note: errors are setup/teardown failures, not assertion failures
-        summary_pattern = r'=+\s*(?:(\d+)\s+failed.*?)?(\d+)\s+passed(?:.*?(\d+)\s+skipped)?(?:.*?(\d+)\s+errors?)?.*?in\s+([\d.]+)s?\s*=+'
-        summary_match = re.search(summary_pattern, console_log)
+        # Find the pytest summary line: "=== 1 failed, 2 passed, 1 skipped in 3.45s ==="
+        summary_line_match = re.search(r'(=+\s*.+?\s+in\s+[\d.]+s?\s*=+)', console_log)
 
-        if summary_match:
-            results['failed'] = int(summary_match.group(1) or 0)
-            results['passed'] = int(summary_match.group(2))
-            results['skipped'] = int(summary_match.group(3) or 0)
-            results['errors'] = int(summary_match.group(4) or 0)
-            results['duration'] = summary_match.group(5)
+        if summary_line_match:
+            summary_line = summary_line_match.group(1)
+            counts = re.findall(r'(\d+)\s+(passed|failed|skipped|errors?)', summary_line)
+            for count, status in counts:
+                if status == 'passed':
+                    results['passed'] = int(count)
+                elif status == 'failed':
+                    results['failed'] = int(count)
+                elif status == 'skipped':
+                    results['skipped'] = int(count)
+                elif status.startswith('error'):
+                    results['errors'] = int(count)
+
+            duration_match = re.search(r'in\s+([\d.]+)s?', summary_line)
+            if duration_match:
+                results['duration'] = duration_match.group(1)
+
             results['total'] = results['passed'] + results['failed'] + results['skipped'] + results['errors']
             results['evidence_status'] = 'console'
             results['evidence_sources'].append('console_summary')
         else:
-            # Pattern 2: Alternate summary format (all passed)
-            # "=== 2 passed in 1.23s ==="
-            alt_summary = r'=+\s*(\d+)\s+passed.*?in\s+([\d.]+)s?\s*=+'
-            alt_match = re.search(alt_summary, console_log)
-            if alt_match:
-                results['passed'] = int(alt_match.group(1))
-                results['duration'] = alt_match.group(2)
-                results['total'] = results['passed']
-                results['evidence_status'] = 'console'
-                results['evidence_sources'].append('console_summary')
-            else:
-                # No summary found
-                results['evidence_status'] = 'partial'
-                results['warnings'].append('No pytest summary line found in console output')
+            results['evidence_status'] = 'partial'
+            results['warnings'].append('No pytest summary line found in console output')
 
         # Extract individual test results
         # Pattern: "test_file.py::test_name PASSED/FAILED/SKIPPED [XX%]"
@@ -317,7 +313,7 @@ if __name__ == '__main__':
     ========================= 1 failed, 1 passed in 2.5s ==========================
     """
 
-    parser = ModelRegistryPytestParser({})
+    parser = PytestDefaultParser({})
     results = parser.parse_console_output(sample_output)
 
     print("Results:", results)

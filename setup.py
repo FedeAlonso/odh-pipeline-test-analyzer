@@ -20,7 +20,7 @@ setup(
     author_email="rhoai-qe@redhat.com",
     url="https://github.com/antowaddle/odh-pipeline-test-analyzer",
 
-    packages=find_packages(include=['analyzer', 'analyzer.*']),
+    packages=find_packages(include=['analyzer', 'analyzer.*', 'scripts', 'scripts.*']),
 
     # Include non-Python files
     include_package_data=True,

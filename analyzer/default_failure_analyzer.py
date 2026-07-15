@@ -7,7 +7,6 @@ This is the default analyzer used when teams don't provide their own.
 Teams can copy and customize this for their specific needs.
 """
 import re
-import asyncio
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 
@@ -35,7 +34,7 @@ class DefaultFailureAnalyzer:
         self.config = component_config
         self.repo_url = component_config.get('repository', {}).get('url', '')
 
-    async def analyze_failures(
+    def analyze_failures(
         self,
         failures: List[Dict[str, Any]],
         build_info: Dict[str, Any],
@@ -77,7 +76,7 @@ class DefaultFailureAnalyzer:
 
         # Analyze each cluster
         for cluster in clusters:
-            root_cause = await self._analyze_cluster(cluster, build_info, must_gather_data)
+            root_cause = self._analyze_cluster(cluster, build_info, must_gather_data)
             if root_cause:
                 analysis_results['root_causes'].append(root_cause)
 
@@ -219,7 +218,7 @@ class DefaultFailureAnalyzer:
 
         return insights
 
-    async def _analyze_cluster(
+    def _analyze_cluster(
         self,
         cluster: Dict[str, Any],
         build_info: Dict[str, Any],
@@ -399,6 +398,4 @@ def analyze_failures(failures: List[Dict[str, Any]], config: Dict[str, Any], bui
         Analysis results
     """
     analyzer = DefaultFailureAnalyzer(config)
-    # Run async analysis
-    import asyncio
-    return asyncio.run(analyzer.analyze_failures(failures, build_info))
+    return analyzer.analyze_failures(failures, build_info)

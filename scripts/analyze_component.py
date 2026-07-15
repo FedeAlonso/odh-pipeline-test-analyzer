@@ -11,23 +11,17 @@ Usage:
 """
 import sys
 import argparse
-import os
 import asyncio
 from pathlib import Path
 from datetime import datetime
+
+from dotenv import load_dotenv
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Load .env file if it exists
-env_file = Path(__file__).parent.parent / ".env"
-if env_file.exists():
-    with open(env_file) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                os.environ[key] = value
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 from analyzer.registry import ComponentRegistry
 
@@ -367,7 +361,7 @@ async def analyze_component_build(component_name: str, framework: str,
         }
 
         try:
-            analysis_results = await default_analyzer.analyze_failures(
+            analysis_results = default_analyzer.analyze_failures(
                 failures, build_info, must_gather_data=must_gather_data
             )
             analyzed_failures = analysis_results

@@ -271,9 +271,9 @@ class YourComponentAnalyzer(BaseFailureAnalyzer):
 {
   "jenkins": {
     "job_paths": [
-      "rhoai/your-component/sanity",      // Quick smoke tests
-      "rhoai/your-component/nightly",     // Full suite
-      "rhoai/your-component/release"      // Release blockers
+      "rhoai/your-component/sanity",
+      "rhoai/your-component/nightly",
+      "rhoai/your-component/release"
     ]
   }
 }
@@ -307,8 +307,8 @@ If your tests run in a shared Jenkins job (like `rhoai-sanity`), use artifact pa
   "jenkins": {
     "job_paths": ["rhoai/3.4/selfmanaged/cli/aws/rhoai-sanity"],
     "artifact_patterns": [
-      "**/model-registry*.xml",  // Only model-registry results
-      "**/ai-hub*.xml"           // And ai-hub results
+      "**/model-registry*.xml",
+      "**/ai-hub*.xml"
     ]
   }
 }

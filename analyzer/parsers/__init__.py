@@ -32,8 +32,7 @@ def get_default_parser(framework: str):
     """
     parsers = {
         'pytest': PytestDefaultParser,
-        'jest': PytestDefaultParser,  # Jest output is similar enough
-        'junit': PytestDefaultParser,  # JUnit XML is similar
+        'junit': PytestDefaultParser,  # JUnit XML is compatible
     }
 
     # Add optional parsers if available

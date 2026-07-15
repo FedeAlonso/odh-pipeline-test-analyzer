@@ -347,10 +347,7 @@ Tests run against these namespaces:
 ### Analyze Latest Build
 
 ```bash
-cd /Users/acoughli/dashboard-build-analyzer
-source venv/bin/activate
-
-python scripts/analyze_component.py {config['name']} {config['framework']} --build <BUILD_NUMBER>
+rhoai-tfa analyze {config['name']} --framework={config['framework']} --build=<BUILD_NUMBER>
 ```
 
 ### Run Tests Locally
