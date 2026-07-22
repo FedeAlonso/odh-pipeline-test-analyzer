@@ -18,10 +18,10 @@
       "dash-e2e-odh"
     ],
     "artifact_patterns": [
-      "**/mochawesome*.json",
-      "**/cypress-results*.json",
-      "**/screenshots/**/*.png",
-      "**/videos/**/*.mp4"
+      "**/mochawesome*.xml",
+      "**/cypress-results*.xml",
+      "**/junit*.xml",
+      "**/test-results*.xml"
     ],
     "parent_jobs": [
       "devops/rhoai-test-flow"
@@ -60,8 +60,6 @@
   },
 
   "analysis": {
-    "parser_module": "parser.py",
-    "analyzer_module": "analyzer.py",
     "failure_categories": [
       "timeout",
       "assertion",

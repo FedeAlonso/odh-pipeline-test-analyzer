@@ -364,25 +364,29 @@ async def analyze_component_build(component_name: str, framework: str,
             analysis_results = default_analyzer.analyze_failures(
                 failures, build_info, must_gather_data=must_gather_data
             )
-            analyzed_failures = analysis_results
-            print(f"✅ Analyzed {analysis_results.get('total_failures', 0)} failures")
-            print(f"   Found {len(analysis_results.get('failure_clusters', []))} failure clusters")
-            print(f"   Generated {len(analysis_results.get('recommendations', []))} recommendations")
+            analyzed_failures = {
+                'failures': failures,
+                'failure_clusters': analysis_results.get('failure_clusters', []),
+                'recommendations': analysis_results.get('recommendations', []),
+                'root_causes': analysis_results.get('root_causes', []),
+                'total_failures': analysis_results.get('total_failures', 0),
+            }
+            print(f"✅ Analyzed {analyzed_failures['total_failures']} failures")
+            print(f"   Found {len(analyzed_failures['failure_clusters'])} failure clusters")
+            print(f"   Generated {len(analyzed_failures['recommendations'])} recommendations")
         except Exception as e:
             print(f"⚠️  Analysis failed: {e}")
-            analyzed_failures = {'total_failures': len(failures), 'failure_clusters': [], 'recommendations': []}
+            analyzed_failures = {'failures': failures, 'failure_clusters': [], 'recommendations': [], 'total_failures': len(failures)}
     else:
         print(f"✅ Using component-specific analyzer")
-        analyzed_failures = []
+        analyzed_list = []
         try:
-            # Analyze each failure
             for failure in failures:
                 analyzed = analyzer_module.analyze_failure(failure)
-                analyzed_failures.append(analyzed)
+                analyzed_list.append(analyzed)
 
-            # Show categories
             categories = {}
-            for f in analyzed_failures:
+            for f in analyzed_list:
                 cat = f.get('category', 'unknown')
                 categories[cat] = categories.get(cat, 0) + 1
 
@@ -393,7 +397,14 @@ async def analyze_component_build(component_name: str, framework: str,
 
         except Exception as e:
             print(f"⚠️  Error during analysis: {e}")
-            analyzed_failures = failures  # Use unanalyzed
+            analyzed_list = failures
+
+        analyzed_failures = {
+            'failures': analyzed_list,
+            'failure_clusters': [],
+            'recommendations': [],
+            'total_failures': len(analyzed_list),
+        }
 
     # Step 8: Cluster inspection (optional)
     cluster_state = None
@@ -455,9 +466,11 @@ async def analyze_component_build(component_name: str, framework: str,
                 lines.append(f"- Skipped: {tr['skipped']}\n")
 
                 # Failures
-                if analysis_results.get('analyzed_failures'):
+                af = analysis_results.get('analyzed_failures', {})
+                failure_list = af.get('failures', []) if isinstance(af, dict) else af
+                if failure_list:
                     lines.append(f"## Failures\n")
-                    for i, f in enumerate(analysis_results['analyzed_failures'], 1):
+                    for i, f in enumerate(failure_list, 1):
                         lines.append(f"### {i}. {f['test_name']}")
                         lines.append(f"**File**: {f.get('test_file', 'Unknown')}")
                         lines.append(f"**Error**: {f.get('error_message', 'No message')}\n")
@@ -554,10 +567,15 @@ Examples:
         args.variant
     ))
 
-    if result:
-        sys.exit(0)
-    else:
+    if not result:
         sys.exit(1)
+
+    evidence_status = result.get('test_results', {}).get('evidence_status', '')
+    if evidence_status == 'inconclusive':
+        print("⚠️  Exiting non-zero: evidence status is inconclusive")
+        sys.exit(2)
+
+    sys.exit(0)
 
 
 if __name__ == '__main__':

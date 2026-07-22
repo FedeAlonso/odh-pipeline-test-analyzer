@@ -408,15 +408,11 @@ tr:hover { background:var(--bg2); }
 
     def _generate_failures_section(self, analysis_results: Dict[str, Any]) -> str:
         """Generate failures section with details"""
-        analyzed_failures = analysis_results.get('analyzed_failures', [])
-
-        # Handle dict from default analyzer (extract failures list from clusters)
-        if isinstance(analyzed_failures, dict):
-            failures = []
-            for cluster in analyzed_failures.get('failure_clusters', []):
-                failures.extend(cluster.get('failures', []))
+        af = analysis_results.get('analyzed_failures', {})
+        if isinstance(af, dict):
+            failures = af.get('failures', [])
         else:
-            failures = analyzed_failures
+            failures = af
 
         if not failures:
             return """<div class="section">

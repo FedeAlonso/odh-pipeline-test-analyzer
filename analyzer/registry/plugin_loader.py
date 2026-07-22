@@ -200,9 +200,10 @@ class PluginLoader:
                             sections.append("")
 
                     # Overall failures
-                    analyzed_failures = analysis_results.get('analyzed_failures', [])
-                    if analyzed_failures:
-                        sections.append(self.format_failure_section(analyzed_failures))
+                    af = analysis_results.get('analyzed_failures', {})
+                    failure_list = af.get('failures', []) if isinstance(af, dict) else af
+                    if failure_list:
+                        sections.append(self.format_failure_section(failure_list))
 
                         # Category breakdown
                         by_category = analysis_results.get('by_category', {})
