@@ -85,6 +85,9 @@ class Config:
     RHOAI_TEST_VARIABLES = os.getenv("RHOAI_TEST_VARIABLES", "")
     ODH_TEST_VARIABLES = os.getenv("ODH_TEST_VARIABLES", "")
 
+    # Confluence Configuration (uses same Atlassian Cloud auth as Jira)
+    CONFLUENCE_PAGE_ID = os.getenv("CONFLUENCE_PAGE_ID", "")
+
     # Tracer tool path (for image analysis)
     TRACER_PATH = os.getenv("TRACER_PATH", "/path/to/tracer/tracer.sh")
 

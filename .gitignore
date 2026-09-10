@@ -19,6 +19,9 @@ build/
 .env.bak
 *.env.bak
 
+# Local MCP server config (contains Slack session tokens)
+opencode.json
+
 # Claude settings (personal local settings and memory - not shared)
 .claude/settings.local.json
 .claude/memory/

@@ -513,6 +513,20 @@ def main():
         log("Phase 2: Skipped (SKIP_DEEP_ANALYSIS=true)")
         deep_rc = 0
 
+    # Phase 3: Generate TFA summary for Jenkins Bot
+    log("")
+    log("Phase 3: Generate TFA summary")
+    log("-" * 40)
+    try:
+        tfa_rc = subprocess.run(
+            [sys.executable, "scripts/generate_tfa_summary.py", build_number, product],
+            cwd=str(PROJECT_ROOT),
+        ).returncode
+        if tfa_rc != 0:
+            log(f"TFA summary generation exited with code {tfa_rc}")
+    except Exception as e:
+        log(f"TFA summary generation failed (non-fatal): {e}")
+
     # Summary
     log("")
     log("=" * 50)
