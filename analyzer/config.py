@@ -45,6 +45,9 @@ class Config:
     FRONTEND_REPO_PATH = os.getenv("FRONTEND_REPO_PATH", "")  # GitHub
     JENKINS_REPO_PATH = os.getenv("JENKINS_REPO_PATH", "")    # GitLab
 
+    # Team ownership file (absolute path, or resolved relative to FRONTEND_REPO_PATH)
+    TEAM_OWNERSHIP_PATH = os.getenv("TEAM_OWNERSHIP_PATH", "packages/cypress/cypress/tests/e2e/team-ownership.json")
+
     # Job Configuration
     # The dashboard-e2e-tests job runs the full E2E pipeline (setup + Cypress tests)
     DASHBOARD_TESTS_JOB_PATH = "components/dashboard/dashboard-e2e-tests"
@@ -84,9 +87,6 @@ class Config:
     # Test variables paths
     RHOAI_TEST_VARIABLES = os.getenv("RHOAI_TEST_VARIABLES", "")
     ODH_TEST_VARIABLES = os.getenv("ODH_TEST_VARIABLES", "")
-
-    # Confluence Configuration (uses same Atlassian Cloud auth as Jira)
-    CONFLUENCE_PAGE_ID = os.getenv("CONFLUENCE_PAGE_ID", "")
 
     # Tracer tool path (for image analysis)
     TRACER_PATH = os.getenv("TRACER_PATH", "/path/to/tracer/tracer.sh")
