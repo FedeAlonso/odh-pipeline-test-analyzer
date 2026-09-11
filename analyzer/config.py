@@ -45,9 +45,6 @@ class Config:
     FRONTEND_REPO_PATH = os.getenv("FRONTEND_REPO_PATH", "")  # GitHub
     JENKINS_REPO_PATH = os.getenv("JENKINS_REPO_PATH", "")    # GitLab
 
-    # Team ownership file (absolute path, or resolved relative to FRONTEND_REPO_PATH)
-    TEAM_OWNERSHIP_PATH = os.getenv("TEAM_OWNERSHIP_PATH", "packages/cypress/cypress/tests/e2e/team-ownership.json")
-
     # Job Configuration
     # The dashboard-e2e-tests job runs the full E2E pipeline (setup + Cypress tests)
     DASHBOARD_TESTS_JOB_PATH = "components/dashboard/dashboard-e2e-tests"
