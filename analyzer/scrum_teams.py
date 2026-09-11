@@ -41,6 +41,7 @@ SLACK_DIRECTORY = {
     "Purple": ("@openshift-ai-dashboards-purple-scrum", "S0ABKEG0C14", ":large_purple_circle:"),
     "Tangerine": ("@openshift-ai-dashboard-tangerine-scrum", "S0AG2A9KP5W", ":tangerine:"),
     "Pewter": ("@openshift-ai-dashboard-pewter-scrum", "S0B5BJW6T8S", ":star:"),
+    "Unassigned": ("@openshift-ai-dashboard-qe", "S08AZ980ER0", ":question:"),
 }
 
 
