@@ -28,12 +28,13 @@ test-variables/
 test-variables/*.yml
 *-test-variables.yml
 
-# IDE
+# IDE / AI tools
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+opencode.json
 
 # OS
 .DS_Store
