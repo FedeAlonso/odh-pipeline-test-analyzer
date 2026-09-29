@@ -90,7 +90,11 @@ Entry point: `scripts/ci_entrypoint.py`. Skip flags: `SKIP_DEEP_ANALYSIS`, `SKIP
 - **Test Variables** — `RHOAI_TEST_VARIABLES`/`ODH_TEST_VARIABLES` (absolute path to `test-variables.yml` per cluster). Falls back to `<frontend_repo>/packages/cypress/test-variables.yml` if not set.
 - **GitLab** — `GITLAB_URL` + `GITLAB_TOKEN` (commit tracking)
 - **Tracer** — `TRACER_PATH` (optional, image metadata extraction)
-- **Slack** — [redhat-community-ai-tools/slack-mcp](https://github.com/redhat-community-ai-tools/slack-mcp) MCP server. Read channel history and send analysis summaries.
+- **Slack** — Two complementary mechanisms, both posting as "RHOAI Jenkins Bot":
+  - **Agent analysis** — [redhat-community-ai-tools/slack-mcp](https://github.com/redhat-community-ai-tools/slack-mcp) MCP server. The Claude Code agent uses xoxc/xoxd browser session tokens (`SLACK_XOXC_TOKEN`/`SLACK_XOXD_TOKEN`) to read channel history and post full analysis summaries. The xoxc token is also used by `findMessageTs()` in the Jenkins shared library to search for the bot's original build notification and retrieve its `thread_ts` for threaded replies.
+  - **TFA summary** — Jenkins Incoming Webhook (`dashboard-slack-webhook` in Vault `apps/rhods-ci/slack`). Posts a compact stats summary (`tfa-summary.txt`) as a threaded reply on the bot's build notification. Because it uses an Incoming Webhook, the message always appears as the bot identity regardless of who triggered the build.
+  - **Token rotation** — xoxc/xoxd tokens are browser session tokens that expire every 2-4 weeks. When they expire, extract new ones from the Slack web app and update `slack-xoxc-token`/`slack-xoxd-token` in Vault at `apps/rhods-ci/agents`. See RHOAIENG-97002 for extraction instructions.
+  - **Future** — A dedicated Slack app (Dashboard's ATFA, App ID: `A0BF3QFPP7W`) is pending workspace admin approval. Once approved, it will replace the xoxc/xoxd tokens with a proper bot token, eliminating the need for manual token rotation.
 - **Kubernetes/OpenShift** — [kubernetes-mcp-server](https://github.com/openshift/openshift-mcp-server) MCP server (full read-write). Provides direct access to pods, logs, events, namespaces, resource metrics, and OpenShift projects without needing `oc login`. Also supports write operations: create/update/delete resources, exec into pods, scale deployments. Uses `~/.kube/config`.
 
 ## Code Conventions

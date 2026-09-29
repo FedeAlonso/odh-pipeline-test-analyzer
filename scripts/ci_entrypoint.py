@@ -402,66 +402,101 @@ def find_previous_build_ticket(build_number: str, product: str) -> str:
 DEEP_ANALYSIS_OUTPUT = Path("/tmp/deep_analysis.md")
 
 
-def build_deep_analysis_prompt(build_number: str, product: str) -> str:
-    """Build a context-rich prompt with Phase 1 findings. Investigation steps are in CLAUDE.md."""
+def build_deep_analysis_prompt(build_number: str, product: str, skip_slack: bool = False) -> str:
+    """Build a prescriptive prompt with exact commands for each step."""
     name = product.upper()
     context = extract_phase1_context(build_number, product)
-
-    parts = [
-        f"Run deep analysis for build {build_number} {name}.",
-        f"Phase 1 reports: reports/current/{name}/latest-build-{build_number}.md and "
-        f"reports/current/{name}/latest-build-{build_number}.html.",
-    ]
-
-    if context["failures"]:
-        parts.append(
-            f"Real failures to investigate: {', '.join(context['failures'])}."
-        )
-
-    if context["flaky"]:
-        parts.append(
-            f"Flaky tests (passed on retry, lower priority): {', '.join(context['flaky'])}."
-        )
-
+    jira_ticket = context.get("jira_ticket", "")
     cluster_url = os.getenv("CLUSTER_API_URL", "").strip()
-    if cluster_url:
-        parts.append(
-            f"Cluster access is configured ({cluster_url}). "
-            f"Use K8s MCP tools to verify pod health, check operator logs, "
-            f"inspect ServingRuntime CRs, and confirm root causes with cluster evidence."
-        )
-
     prev_ticket = find_previous_build_ticket(build_number, product)
-    if prev_ticket:
-        parts.append(
-            f"Previous build analysis: {prev_ticket}. "
-            f"Read its comments for trend comparison."
-        )
 
-    if context["jira_ticket"]:
-        parts.append(
-            f"This build's lock ticket: {context['jira_ticket']}."
-        )
+    md_report = f"reports/current/{name}/latest-build-{build_number}.md"
+    html_report = f"reports/current/{name}/latest-build-{build_number}.html"
+    screenshots_dir = f"reports/current/{name}/screenshots"
+    videos_dir = f"reports/current/{name}/videos"
 
-    parts.append(
-        "Execute step 4b from the Agent Workflow in CLAUDE.md — investigate every "
-        "uninvestigated real failure using the full investigation checklist. "
-        f"Write your complete findings as a markdown file to {DEEP_ANALYSIS_OUTPUT} "
-        "under a '## Deep Analysis' heading. For each failure cluster include: "
-        "root cause, evidence (screenshots, videos, console logs, cluster state), "
-        "related PRs with status, related Jira tickets with status, trend vs previous "
-        "builds, and recommended action. "
-        "Do NOT run inject_deep_analysis.py or post to Jira — the CI pipeline handles "
-        "injection and publishing after you finish. "
-        "Do NOT ask for confirmation — run everything autonomously."
-    )
+    failures_list = ", ".join(context["failures"]) if context["failures"] else "none"
+    flaky_list = ", ".join(context["flaky"]) if context["flaky"] else "none"
 
-    return " ".join(parts)
+    prompt = f"""Nightly analysis for build {build_number} ({name}). Run every step below in order. Do NOT ask for confirmation. Do NOT skip any step.
+
+CONTEXT:
+- MD report: {md_report}
+- HTML report: {html_report}
+- Screenshots: {screenshots_dir}/
+- Videos: {videos_dir}/
+- Real failures: {failures_list}
+- Flaky tests: {flaky_list}
+- Lock ticket: {jira_ticket or 'none'}
+- Previous build ticket: {prev_ticket or 'none'}
+- Cluster: {cluster_url or 'not configured'}
+
+STEP 1 — INVESTIGATE EACH REAL FAILURE
+For each real failure listed above, do ALL of the following (skip nothing):
+1a. Read the MD report section for this test — note error message and failure category.
+1b. Look at screenshots in {screenshots_dir}/ for this test — describe what the UI shows.
+1c. Check {videos_dir}/ for a recording — describe the failure sequence if present.
+1d. Grep the Jenkins console log for the test name — find the exact error and stack trace.
+1e. Use K8s MCP tools to check pod health in redhat-ods-applications and redhat-ods-operator.
+1f. Check operator age/version — use tracer output or `oc get csv` in redhat-ods-operator.
+1g. Search Jira: read {prev_ticket or 'the previous build ticket'} comments for this same failure.
+1h. Search RHOAIENG for open bugs mentioning this test name or error. Note key, status, assignee.
+1i. Search odh-dashboard repo for recent PRs touching the test file or related components. Use `gh pr list` and `gh api repos/opendatahub-io/odh-dashboard/commits`.
+1j. Read the test source in the odh-dashboard repo: frontend/src/__tests__/cypress/cypress/tests/e2e/
+
+STEP 2 — WRITE DEEP ANALYSIS
+Write findings to {DEEP_ANALYSIS_OUTPUT} under a `## Deep Analysis` heading.
+For each failure cluster, include: root cause, evidence, related PRs (with status), related Jira tickets (with status), trend vs previous builds, recommended action.
+
+STEP 3 — INJECT INTO REPORTS AND UPLOAD TO JIRA
+Run this exact command:
+python scripts/inject_deep_analysis.py {html_report} {DEEP_ANALYSIS_OUTPUT} --update-md {md_report}{f' --jira-ticket {jira_ticket}' if jira_ticket else ''}
+Verify: read the last 20 lines of {md_report} to confirm the deep analysis section was appended.
+
+STEP 4 — POST ANALYSIS SUMMARY TO JIRA
+Read the MD report to extract test counts (total, passed, failed, flaky).
+Run scripts/post_analysis_summaries.py jira with the correct values:
+python scripts/post_analysis_summaries.py jira --ticket {jira_ticket} --build {build_number} --platform {name} --total <N> --passed <N> --failed <N> --real-failures '<name:error:jira_key,...>' --flaky '<name1,name2>' --extra-notes '<key observation>'
+"""
+
+    if not skip_slack:
+        prompt += f"""
+STEP 5 — POST FULL ANALYSIS TO SLACK
+This is the most important step. The Slack message must be a FULL ANALYSIS, not a summary.
+
+5a. Search for the Jenkins Bot message:
+    Use mcp__slack__search_messages with query "dashboard-e2e-tests/{build_number}" to find the bot's build notification. Extract thread_ts from the result.
+
+5b. Get historical context:
+    Use mcp__slack__search_messages to find the 5 previous builds' bot messages.
+    Use mcp__slack__get_thread on each to read thread replies.
+
+5c. Enrich with external context:
+    For each Jira ticket referenced in threads, fetch current status via Jira API.
+    For each PR referenced, check if it's merged/open/closed.
+
+5d. Write and post the Slack message using mcp__slack__post_message with thread_ts from 5a.
+    The message MUST include all of these sections:
+    - Header: "*NOTE: _This is an Agentic-AI generated message. This feature is still WIP_*" then Jira link, stats (total/passed/failed/flaky), cluster health.
+    - Deployment info: operator SHA, build date, RHOAI version, dashboard commit.
+    - Failure clusters with root cause analysis — explain WHY, not just what.
+    - Related PRs with status (merged/open) and whether the fix is in this build's image.
+    - Related Jira tickets with current status and assignee.
+    - Trend analysis: compare vs previous builds using thread data. Show trajectory.
+    - Recovery notes: tests that were previously failing but now pass.
+    Use Slack formatting: *bold*, _italic_, `code`, :emoji:, bullet points.
+
+5e. Verify: confirm the mcp__slack__post_message call returned successfully.
+"""
+    else:
+        prompt += "\nSTEP 5 — SLACK: Skipped (no tokens configured).\n"
+
+    return prompt
 
 
-def run_deep_analysis(build_number: str, product: str) -> int:
-    """Run Claude Code agent for deep analysis. Returns 0 on success."""
-    prompt = build_deep_analysis_prompt(build_number, product)
+def run_deep_analysis(build_number: str, product: str, skip_slack: bool = False) -> int:
+    """Run Claude Code agent for the full workflow. Returns 0 on success."""
+    prompt = build_deep_analysis_prompt(build_number, product, skip_slack=skip_slack)
 
     if DEEP_ANALYSIS_OUTPUT.exists():
         DEEP_ANALYSIS_OUTPUT.unlink()
@@ -576,23 +611,28 @@ def main():
     if not skip_deep:
         configure_mcp_servers()
 
-    # Phase 2: Claude Code deep analysis
+    # Phase 2: Claude Code agent — full workflow (deep analysis, Jira, Slack)
     deep_rc = 0
     if not skip_deep:
         log("")
-        log("Phase 2: Deep analysis (Claude Code agent)")
+        log("Phase 2: Agent workflow (Claude Code)")
         log("-" * 40)
-        deep_rc = run_deep_analysis(build_number, product)
+        deep_rc = run_deep_analysis(build_number, product, skip_slack=skip_slack)
 
-        # Phase 2b: Inject analysis into reports + upload to Jira
-        if deep_rc == 0:
-            context = extract_phase1_context(build_number, product)
-            jira_ticket = context.get("jira_ticket", "")
-            inject_rc = inject_deep_analysis(build_number, product, jira_ticket)
-            if inject_rc != 0:
-                log("Report injection failed — report will not contain deep analysis")
-        else:
-            log("Skipping report injection — deep analysis did not produce output")
+        # Fallback: if agent wrote findings but didn't inject them, do it here
+        if deep_rc == 0 and DEEP_ANALYSIS_OUTPUT.exists():
+            name = product.upper()
+            html_path = PROJECT_ROOT / "reports" / "current" / name / f"latest-build-{build_number}.html"
+            html_has_analysis = False
+            if html_path.exists():
+                html_has_analysis = "Deep Analysis" in html_path.read_text()[:50000]
+            if not html_has_analysis:
+                log("Agent did not inject analysis into reports — running fallback injection")
+                context = extract_phase1_context(build_number, product)
+                jira_ticket = context.get("jira_ticket", "")
+                inject_deep_analysis(build_number, product, jira_ticket)
+        elif deep_rc != 0:
+            log("Agent workflow failed — reports will not contain deep analysis")
     else:
         log("")
         log("Phase 2: Skipped (SKIP_DEEP_ANALYSIS=true)")
