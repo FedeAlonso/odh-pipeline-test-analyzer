@@ -4,6 +4,8 @@
 # Build: podman build -f Containerfile.ci -t pipeline-test-analyzer .
 # Run:   podman run --env-file .env -e BUILD_NUMBER=1571 -e PRODUCT=rhoai pipeline-test-analyzer
 
+FROM quay.io/redhat-ai-tools/slack-mcp AS slack-mcp
+
 FROM registry.redhat.io/ubi9/python-311:9.6 AS builder
 
 USER 0
@@ -65,6 +67,9 @@ RUN dnf module enable -y nodejs:20 && \
 # Claude Code CLI + Kubernetes MCP server
 RUN npm install -g @anthropic-ai/claude-code kubernetes-mcp-server
 
+# Slack MCP server (Python app — deps httpx and mcp are in requirements.txt)
+COPY --from=slack-mcp /app/slack_mcp_server.py /opt/slack-mcp/slack_mcp_server.py
+
 # Python dependencies
 WORKDIR /app
 COPY requirements.txt ./
@@ -98,6 +103,9 @@ COPY --from=builder /usr/local/share/tracer/tracer.sh /usr/local/bin/tracer.sh
 
 # Copy Python site-packages from builder
 COPY --from=builder /opt/app-root/lib/python3.11/site-packages /opt/app-root/lib/python3.11/site-packages
+
+# Copy Slack MCP server from builder
+COPY --from=builder /opt/slack-mcp /opt/slack-mcp
 
 WORKDIR /app
 

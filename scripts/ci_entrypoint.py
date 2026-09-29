@@ -80,9 +80,23 @@ def configure_mcp_servers():
 
     config = {"projects": {"/app": {"hasTrustDialogAccepted": True}}, "mcpServers": {}}
 
-    # Slack MCP — disabled in CI. Session tokens (xoxc/xoxd) expire frequently
-    # and can't be refreshed programmatically. Slack posting is handled by the
-    # interactive Claude Code agent when running locally.
+    # Slack MCP — configured when SLACK_XOXC_TOKEN and SLACK_XOXD_TOKEN are set.
+    # Session tokens (xoxc/xoxd) expire every 2-4 weeks; refresh in Vault when needed.
+    xoxc = os.getenv("SLACK_XOXC_TOKEN", "")
+    xoxd = os.getenv("SLACK_XOXD_TOKEN", "")
+    if xoxc and xoxd:
+        config["mcpServers"]["slack"] = {
+            "command": sys.executable,
+            "args": ["/opt/slack-mcp/slack_mcp_server.py"],
+            "env": {
+                "SLACK_XOXC_TOKEN": xoxc,
+                "SLACK_XOXD_TOKEN": xoxd,
+                "MCP_TRANSPORT": "stdio",
+            },
+        }
+        log("MCP: Slack server configured")
+    else:
+        log("MCP: Slack server skipped (no xoxc/xoxd tokens)")
 
     # Kubernetes MCP — needs KUBECONFIG or ~/.kube/config
     kubeconfig = os.getenv("KUBECONFIG", str(home / ".kube" / "config"))
@@ -290,7 +304,7 @@ def setup_frontend_repo():
     return str(clone_dir)
 
 
-def run_analysis(build_number: str, product: str) -> int:
+def run_analysis(build_number: str, product: str, skip_slack: bool = True) -> int:
     """Run comprehensive_analysis.py and return the exit code."""
     cmd = [
         sys.executable,
@@ -303,7 +317,7 @@ def run_analysis(build_number: str, product: str) -> int:
 
     if is_true("SKIP_RERUN"):
         cmd.append("--skip-rerun")
-    if not is_false("SKIP_SLACK"):
+    if skip_slack:
         cmd.append("--skip-slack")
     if is_true("SKIP_JIRA"):
         cmd.append("--skip-jira")
@@ -385,6 +399,9 @@ def find_previous_build_ticket(build_number: str, product: str) -> str:
     return ""
 
 
+DEEP_ANALYSIS_OUTPUT = Path("/tmp/deep_analysis.md")
+
+
 def build_deep_analysis_prompt(build_number: str, product: str) -> str:
     """Build a context-rich prompt with Phase 1 findings. Investigation steps are in CLAUDE.md."""
     name = product.upper()
@@ -427,20 +444,27 @@ def build_deep_analysis_prompt(build_number: str, product: str) -> str:
         )
 
     parts.append(
-        "Execute steps 4b, 4c, 4d, and 5 from the Agent Workflow in CLAUDE.md. "
-        "Use scripts/inject_deep_analysis.py to update the reports. "
+        "Execute step 4b from the Agent Workflow in CLAUDE.md — investigate every "
+        "uninvestigated real failure using the full investigation checklist. "
+        f"Write your complete findings as a markdown file to {DEEP_ANALYSIS_OUTPUT} "
+        "under a '## Deep Analysis' heading. For each failure cluster include: "
+        "root cause, evidence (screenshots, videos, console logs, cluster state), "
+        "related PRs with status, related Jira tickets with status, trend vs previous "
+        "builds, and recommended action. "
+        "Do NOT run inject_deep_analysis.py or post to Jira — the CI pipeline handles "
+        "injection and publishing after you finish. "
         "Do NOT ask for confirmation — run everything autonomously."
     )
-
-    if is_true("SKIP_JIRA"):
-        parts.append("Skip Jira posting.")
 
     return " ".join(parts)
 
 
 def run_deep_analysis(build_number: str, product: str) -> int:
-    """Run Claude Code agent for deep analysis, Jira posting, and Slack thread."""
+    """Run Claude Code agent for deep analysis. Returns 0 on success."""
     prompt = build_deep_analysis_prompt(build_number, product)
+
+    if DEEP_ANALYSIS_OUTPUT.exists():
+        DEEP_ANALYSIS_OUTPUT.unlink()
 
     cmd = [
         "claude",
@@ -454,6 +478,57 @@ def run_deep_analysis(build_number: str, product: str) -> int:
     auth_mode = "Vertex AI" if use_vertex else "Anthropic API"
     log(f"Running Claude Code agent for deep analysis (auth: {auth_mode})...")
     result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+
+    if result.returncode != 0:
+        log(f"Claude Code agent exited with code {result.returncode}")
+        return result.returncode
+
+    if not DEEP_ANALYSIS_OUTPUT.exists():
+        log(f"Deep analysis: FAILED — agent did not write {DEEP_ANALYSIS_OUTPUT}")
+        return 1
+
+    size = DEEP_ANALYSIS_OUTPUT.stat().st_size
+    if size < 200:
+        log(f"Deep analysis: FAILED — output too small ({size} bytes), likely incomplete")
+        return 1
+
+    log(f"Deep analysis: agent wrote {size} bytes to {DEEP_ANALYSIS_OUTPUT}")
+    return 0
+
+
+def inject_deep_analysis(build_number: str, product: str, jira_ticket: str) -> int:
+    """Inject deep analysis into reports and optionally upload to Jira."""
+    name = product.upper()
+    html_path = PROJECT_ROOT / "reports" / "current" / name / f"latest-build-{build_number}.html"
+    md_path = PROJECT_ROOT / "reports" / "current" / name / f"latest-build-{build_number}.md"
+
+    if not html_path.exists():
+        log(f"Report injection: HTML report not found at {html_path}")
+        return 1
+
+    cmd = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "inject_deep_analysis.py"),
+        str(html_path),
+        str(DEEP_ANALYSIS_OUTPUT),
+    ]
+
+    if md_path.exists():
+        cmd.extend(["--update-md", str(md_path)])
+
+    if jira_ticket and not is_true("SKIP_JIRA"):
+        cmd.extend(["--jira-ticket", jira_ticket])
+
+    log("Injecting deep analysis into reports...")
+    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+
+    if result.returncode == 0:
+        log("Report injection: OK")
+        if jira_ticket and not is_true("SKIP_JIRA"):
+            log(f"Jira upload: OK ({jira_ticket})")
+    else:
+        log(f"Report injection: FAILED ({result.returncode})")
+
     return result.returncode
 
 
@@ -473,12 +548,13 @@ def main():
     product = os.getenv("PRODUCT").lower()
     skip_deep = is_true("SKIP_DEEP_ANALYSIS")
 
-    skip_slack = not is_false("SKIP_SLACK")
+    has_slack_tokens = bool(os.getenv("SLACK_XOXC_TOKEN")) and bool(os.getenv("SLACK_XOXD_TOKEN"))
+    skip_slack = not is_false("SKIP_SLACK") and not has_slack_tokens
 
     log(f"Build: {build_number}")
     log(f"Product: {product}")
     log(f"Deep analysis: {'disabled' if skip_deep else 'enabled'}")
-    log(f"Slack: {'disabled (default in CI — set SKIP_SLACK=false to enable)' if skip_slack else 'enabled'}")
+    log(f"Slack: {'disabled' if skip_slack else 'enabled (tokens present)'}")
 
     # Setup
     setup_tracer()
@@ -489,7 +565,7 @@ def main():
     log("")
     log("Phase 1: Automated analysis")
     log("-" * 40)
-    analysis_rc = run_analysis(build_number, product)
+    analysis_rc = run_analysis(build_number, product, skip_slack=skip_slack)
 
     if analysis_rc != 0:
         log(f"Automated analysis exited with code {analysis_rc}")
@@ -501,24 +577,49 @@ def main():
         configure_mcp_servers()
 
     # Phase 2: Claude Code deep analysis
+    deep_rc = 0
     if not skip_deep:
         log("")
         log("Phase 2: Deep analysis (Claude Code agent)")
         log("-" * 40)
         deep_rc = run_deep_analysis(build_number, product)
-        if deep_rc != 0:
-            log(f"Deep analysis exited with code {deep_rc}")
+
+        # Phase 2b: Inject analysis into reports + upload to Jira
+        if deep_rc == 0:
+            context = extract_phase1_context(build_number, product)
+            jira_ticket = context.get("jira_ticket", "")
+            inject_rc = inject_deep_analysis(build_number, product, jira_ticket)
+            if inject_rc != 0:
+                log("Report injection failed — report will not contain deep analysis")
+        else:
+            log("Skipping report injection — deep analysis did not produce output")
     else:
         log("")
         log("Phase 2: Skipped (SKIP_DEEP_ANALYSIS=true)")
-        deep_rc = 0
+
+    # Phase 3: Generate TFA summary for Slack posting
+    if analysis_rc == 0:
+        log("")
+        log("Phase 3: TFA Summary")
+        log("-" * 40)
+        summary_script = PROJECT_ROOT / "scripts" / "generate_tfa_summary.py"
+        if summary_script.exists():
+            summary_rc = subprocess.run(
+                [sys.executable, str(summary_script), build_number, product],
+                cwd=str(PROJECT_ROOT),
+            ).returncode
+            if summary_rc != 0:
+                log(f"TFA summary generation failed ({summary_rc})")
+        else:
+            log("TFA summary script not found — skipping")
 
     # Summary
     log("")
     log("=" * 50)
     log(f"Automated analysis: {'OK' if analysis_rc == 0 else f'FAILED ({analysis_rc})'}")
     if not skip_deep:
-        log(f"Deep analysis:      {'OK' if deep_rc == 0 else f'FAILED ({deep_rc})'}")
+        agent_ok = deep_rc == 0
+        log(f"Deep analysis:      {'OK' if agent_ok else 'FAILED — no analysis in report'}")
 
     # Exit with analysis exit code (deep analysis failures are non-fatal)
     sys.exit(analysis_rc)
