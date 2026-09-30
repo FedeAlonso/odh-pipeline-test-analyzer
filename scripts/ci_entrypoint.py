@@ -459,13 +459,14 @@ Run scripts/post_analysis_summaries.py jira with the correct values:
 python scripts/post_analysis_summaries.py jira --ticket {jira_ticket} --build {build_number} --platform {name} --total <N> --passed <N> --failed <N> --real-failures '<name:error:jira_key,...>' --flaky '<name1,name2>' --extra-notes '<key observation>'
 """
 
+    slack_analysis_path = f"reports/current/{name}/slack-analysis.txt"
     if not skip_slack:
         prompt += f"""
-STEP 5 — POST FULL ANALYSIS TO SLACK
+STEP 5 — WRITE SLACK ANALYSIS (do NOT post — Jenkins posts it via webhook as the bot)
 This is the most important step. The Slack message must be a FULL ANALYSIS, not a summary.
 
 5a. Search for the Jenkins Bot message:
-    Use mcp__slack__search_messages with query "dashboard-e2e-tests/{build_number}" to find the bot's build notification. Extract thread_ts from the result.
+    Use mcp__slack__search_messages with query "dashboard-e2e-tests/{build_number}" to find the bot's build notification.
 
 5b. Get historical context:
     Use mcp__slack__search_messages to find the 5 previous builds' bot messages.
@@ -475,7 +476,8 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
     For each Jira ticket referenced in threads, fetch current status via Jira API.
     For each PR referenced, check if it's merged/open/closed.
 
-5d. Write and post the Slack message using mcp__slack__post_message with thread_ts from 5a.
+5d. Write the Slack analysis to {slack_analysis_path} (the CI pipeline will post it via webhook).
+    Do NOT use mcp__slack__post_message — that posts as the user, not the bot.
     The message MUST include all of these sections:
     - Header: "*NOTE: _This is an Agentic-AI generated message. This feature is still WIP_*" then Jira link, stats (total/passed/failed/flaky), cluster health.
     - Deployment info: operator SHA, build date, RHOAI version, dashboard commit.
@@ -485,8 +487,9 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
     - Trend analysis: compare vs previous builds using thread data. Show trajectory.
     - Recovery notes: tests that were previously failing but now pass.
     Use Slack formatting: *bold*, _italic_, `code`, :emoji:, bullet points.
+    Keep under 39000 characters (Slack message limit is 40000).
 
-5e. Verify: confirm the mcp__slack__post_message call returned successfully.
+5e. Verify: read {slack_analysis_path} and confirm it exists and has content.
 """
     else:
         prompt += "\nSTEP 5 — SLACK: Skipped (no tokens configured).\n"
