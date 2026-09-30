@@ -327,29 +327,90 @@ def run_analysis(build_number: str, product: str, skip_slack: bool = True) -> in
     return result.returncode
 
 
+def load_team_ownership() -> dict | None:
+    """Load team-ownership.json from odh-dashboard repo."""
+    candidates = []
+    frontend = os.getenv("FRONTEND_REPO_PATH", "")
+    if frontend:
+        candidates.append(
+            Path(frontend) / "packages/cypress/cypress/tests/e2e/team-ownership.json"
+        )
+    candidates.extend([
+        PROJECT_ROOT.parent / "odh-dashboard/packages/cypress/cypress/tests/e2e/team-ownership.json",
+        Path("/workspace/odh-dashboard/packages/cypress/cypress/tests/e2e/team-ownership.json"),
+    ])
+    for p in candidates:
+        if p.exists():
+            return json.loads(p.read_text())
+    return None
+
+
+def resolve_team_mention(file_path: str, ownership: dict | None) -> str:
+    """Map a test file path to a Slack team @-mention string."""
+    if not ownership:
+        return ""
+    match = re.search(r"e2e/(.+/)", file_path)
+    default_name = ownership.get("default_team", "")
+    teams = ownership.get("teams", [])
+
+    target_team = None
+    if match:
+        subpath = match.group(1)
+        for team in teams:
+            for pattern in team.get("path_patterns", []):
+                if subpath.startswith(pattern):
+                    target_team = team
+                    break
+            if target_team:
+                break
+
+    if not target_team and default_name:
+        for t in teams:
+            if t["name"] == default_name:
+                target_team = t
+                break
+
+    if not target_team:
+        return ""
+    gid = target_team.get("slack_group_id", "")
+    handle = target_team.get("slack_handle", "")
+    if gid and handle:
+        return f"<!subteam^{gid}|{handle}>"
+    return handle or ""
+
+
 def extract_phase1_context(build_number: str, product: str) -> dict:
     """Extract key findings from Phase 1 MD report for the agent prompt."""
     name = product.upper()
     md_path = PROJECT_ROOT / "reports" / "current" / name / f"latest-build-{build_number}.md"
 
-    context = {"failures": [], "flaky": [], "jira_ticket": ""}
+    context = {"failures": [], "flaky": [], "jira_ticket": "", "team_mentions": {}}
 
     if not md_path.exists():
         return context
 
     content = md_path.read_text()
+    ownership = load_team_ownership()
 
-    # Extract test failures from section headers: ### N. testName.cy.ts [⚠️ *(passed on retry)*]
     test_pattern = re.compile(
         r"^### \d+\.\s+(\S+\.cy\.ts)\s*(⚠️\s*\*\(passed on retry\)\*)?",
         re.MULTILINE,
     )
+    file_pattern = re.compile(r"\*\*📁 File:\*\*\s*`([^`]+)`")
+
     for m in test_pattern.finditer(content):
         test_name = m.group(1).replace(".cy.ts", "")
-        if m.group(2):
+        is_flaky = bool(m.group(2))
+        if is_flaky:
             context["flaky"].append(test_name)
         else:
             context["failures"].append(test_name)
+            chunk = content[m.end():m.end() + 500]
+            fm = file_pattern.search(chunk)
+            file_path = fm.group(1) if fm else ""
+            mention = resolve_team_mention(file_path, ownership)
+            if mention:
+                context["team_mentions"][test_name] = mention
 
     # Extract Jira lock ticket from file (written by comprehensive_analysis.py)
     ticket_file = Path("/app/jira-ticket.txt")
@@ -418,6 +479,21 @@ def build_deep_analysis_prompt(build_number: str, product: str, skip_slack: bool
     failures_list = ", ".join(context["failures"]) if context["failures"] else "none"
     flaky_list = ", ".join(context["flaky"]) if context["flaky"] else "none"
 
+    team_mentions = context.get("team_mentions", {})
+    team_lines = ""
+    if team_mentions:
+        team_lines = "\n- Team ownership (include these @-mentions next to each real failure in the Slack message):"
+        for test, mention in team_mentions.items():
+            team_lines += f"\n    {test} → {mention}"
+
+    jenkins_url = os.getenv("JENKINS_URL", "").strip().rstrip("/")
+    report_artifact_url = ""
+    if jenkins_url:
+        report_artifact_url = (
+            f"{jenkins_url}/job/components/job/dashboard"
+            f"/job/dashboard-e2e-tests/{build_number}/TFA_20Analysis/"
+        )
+
     prompt = f"""Nightly analysis for build {build_number} ({name}). Run every step below in order. Do NOT ask for confirmation. Do NOT skip any step.
 
 CONTEXT:
@@ -429,7 +505,8 @@ CONTEXT:
 - Flaky tests: {flaky_list}
 - Lock ticket: {jira_ticket or 'none'}
 - Previous build ticket: {prev_ticket or 'none'}
-- Cluster: {cluster_url or 'not configured'}
+- Cluster: {cluster_url or 'not configured'}{team_lines}
+- TFA report link: {report_artifact_url or 'not available'}
 
 STEP 1 — INVESTIGATE EACH REAL FAILURE
 For each real failure listed above, do ALL of the following (skip nothing):
@@ -479,9 +556,10 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
 5d. Write the Slack analysis to {slack_analysis_path} (the CI pipeline will post it via webhook).
     Do NOT use mcp__slack__post_message — that posts as the user, not the bot.
     The message MUST include all of these sections:
-    - Header: "*NOTE: _This is an Agentic-AI generated message. This feature is still WIP_*" then Jira link, stats (total/passed/failed/flaky), cluster health.
+    - Header: "*NOTE: _This is an Agentic-AI generated message_*" then Jira link, stats (total/passed/failed/flaky), cluster health.
+    - TFA report link: include "{report_artifact_url}" if available.
     - Deployment info: operator SHA, build date, RHOAI version, dashboard commit.
-    - Failure clusters with root cause analysis — explain WHY, not just what.
+    - Failure clusters with root cause analysis — explain WHY, not just what. For each real failure, include the team @-mention from the CONTEXT above (copy the `<!subteam^...|...>` exactly as given).
     - Related PRs with status (merged/open) and whether the fix is in this build's image.
     - Related Jira tickets with current status and assignee.
     - Trend analysis: compare vs previous builds using thread data. Show trajectory.
@@ -639,22 +717,6 @@ def main():
     else:
         log("")
         log("Phase 2: Skipped (SKIP_DEEP_ANALYSIS=true)")
-
-    # Phase 3: Generate TFA summary for Slack posting
-    if analysis_rc == 0:
-        log("")
-        log("Phase 3: TFA Summary")
-        log("-" * 40)
-        summary_script = PROJECT_ROOT / "scripts" / "generate_tfa_summary.py"
-        if summary_script.exists():
-            summary_rc = subprocess.run(
-                [sys.executable, str(summary_script), build_number, product],
-                cwd=str(PROJECT_ROOT),
-            ).returncode
-            if summary_rc != 0:
-                log(f"TFA summary generation failed ({summary_rc})")
-        else:
-            log("TFA summary script not found — skipping")
 
     # Summary
     log("")

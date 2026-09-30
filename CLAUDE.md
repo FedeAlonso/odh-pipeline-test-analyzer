@@ -307,7 +307,7 @@ Use Slack formatting: `*bold*`, `_italic_`, `` `code` ``, `:emoji:`, bullet poin
 
 Always start the message with:
 ```
-*NOTE: _This is an Agentic-AI generated message. This feature is still WIP_*
+*NOTE: _This is an Agentic-AI generated message_*
 ```
 
 Use the `post_analysis_summaries.py slack` script only as a starting point for the header/stats section if helpful, but the analysis body must be written by the agent with full context.
