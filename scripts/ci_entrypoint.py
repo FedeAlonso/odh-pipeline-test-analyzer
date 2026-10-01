@@ -535,7 +535,7 @@ def build_deep_analysis_prompt(build_number: str, product: str, skip_slack: bool
     videos_dir = f"reports/current/{name}/videos"
 
     failures_list = ", ".join(context["failures"]) if context["failures"] else "none"
-    flaky_list = ", ".join(context["flaky"]) if context["flaky"] else "none"
+    flaky_count = len(context["flaky"])
 
     team_mentions = context.get("team_mentions", {})
     team_lines = ""
@@ -582,7 +582,7 @@ CONTEXT:
 - Screenshots: {screenshots_dir}/
 - Videos: {videos_dir}/
 - Real failures: {failures_list}
-- Flaky tests: {flaky_list}
+- Flaky tests (passed on retry): {flaky_count}
 - Lock ticket: {jira_ticket or 'none'}
 - Previous build ticket: {prev_ticket or 'none'}
 - Cluster: {cluster_url or 'not configured'}{dsc_lines}{team_lines}
@@ -644,7 +644,8 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
 5d. Write the Slack analysis to {slack_analysis_path} (the CI pipeline will post it via webhook).
     Do NOT use mcp__slack__post_message — that posts as the user, not the bot.
     The message MUST include all of these sections:
-    - Header: "*NOTE: _This is an Agentic-AI generated message_*" then Jira link (use :jira: emoji, NOT :jira2:), stats (total/passed/failed/flaky), cluster health.
+    - Header: "*NOTE: _This is an Agentic-AI generated message_*" then Jira link (use :jira: emoji, NOT :jira2:), stats (total/passed/failed/flaky count), cluster health.
+    - Flaky tests: only mention the COUNT in the stats line (e.g. "flaky: 3"). Do NOT list individual flaky test names anywhere in the Slack message.
     - TFA report link: include "{report_artifact_url}" if available.
     - Deployment info: operator SHA, build date, RHOAI version, dashboard commit.
     - Failure clusters with root cause analysis — explain WHY, not just what. For each real failure, include the team @-mention from the CONTEXT above (copy the `<!subteam^...|...>` exactly as given).
