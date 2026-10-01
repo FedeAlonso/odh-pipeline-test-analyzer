@@ -271,6 +271,64 @@ def setup_cluster_access(product: str, build_number: str) -> bool:
         return False
 
 
+def check_dsc_status() -> dict | None:
+    """Check DataScienceCluster status. Returns dict with health info or None if unavailable."""
+    try:
+        result = subprocess.run(
+            ["oc", "get", "datasciencecluster", "-A", "-o", "json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            log("DSC check: could not retrieve DataScienceCluster")
+            return None
+
+        data = json.loads(result.stdout)
+        items = data.get("items", [])
+        if not items:
+            log("DSC check: no DataScienceCluster found")
+            return {"healthy": False, "error": "No DataScienceCluster resource exists", "components": {}}
+
+        dsc = items[0]
+        phase = dsc.get("status", {}).get("phase", "Unknown")
+        conditions = {c["type"]: c for c in dsc.get("status", {}).get("conditions", [])}
+
+        # Component readiness from conditions (e.g. DashboardReady, KserveReady)
+        # Conditions ending in "Ready" with status != "True" and reason != "Removed" are failing
+        components = {}
+        failing = []
+        for ctype, c in conditions.items():
+            if ctype.endswith("Ready") and ctype != "Ready":
+                comp_name = ctype.replace("Ready", "")
+                is_removed = c.get("reason", "") == "Removed"
+                is_ready = c.get("status") == "True" or is_removed
+                components[comp_name] = {"ready": is_ready, "removed": is_removed, "reason": c.get("reason", ""), "message": c.get("message", "")}
+                if not is_ready:
+                    failing.append(comp_name)
+
+        healthy = phase == "Ready" and not failing
+
+        status = {
+            "healthy": healthy,
+            "phase": phase,
+            "conditions": {t: {"status": c.get("status"), "reason": c.get("reason", ""), "message": c.get("message", "")} for t, c in conditions.items()},
+            "components": components,
+            "failing_components": failing,
+        }
+
+        managed_count = sum(1 for c in components.values() if not c["removed"])
+        if healthy:
+            log(f"DSC check: healthy (phase={phase}, {managed_count} managed components)")
+        else:
+            fail_details = ", ".join(f"{c} ({components[c]['reason']}: {components[c]['message'][:80]})" for c in failing)
+            log(f"DSC check: UNHEALTHY (phase={phase}) — {fail_details}")
+
+        return status
+
+    except Exception as e:
+        log(f"DSC check: error — {e}")
+        return None
+
+
 def setup_frontend_repo():
     """Clone odh-dashboard if FRONTEND_REPO_PATH is not set."""
     frontend_path = os.getenv("FRONTEND_REPO_PATH")
@@ -463,7 +521,7 @@ def find_previous_build_ticket(build_number: str, product: str) -> str:
 DEEP_ANALYSIS_OUTPUT = Path("/tmp/deep_analysis.md")
 
 
-def build_deep_analysis_prompt(build_number: str, product: str, skip_slack: bool = False) -> str:
+def build_deep_analysis_prompt(build_number: str, product: str, skip_slack: bool = False, dsc_status: dict | None = None) -> str:
     """Build a prescriptive prompt with exact commands for each step."""
     name = product.upper()
     context = extract_phase1_context(build_number, product)
@@ -494,6 +552,28 @@ def build_deep_analysis_prompt(build_number: str, product: str, skip_slack: bool
             f"/job/dashboard-e2e-tests/{build_number}/TFA_20Analysis/"
         )
 
+    # DSC status context
+    dsc_lines = ""
+    dsc_unhealthy = False
+    if dsc_status is None:
+        dsc_lines = "\n- DSC status: unavailable (no cluster access)"
+    elif dsc_status.get("healthy"):
+        components = dsc_status.get("components", {})
+        managed_count = sum(1 for c in components.values() if not c.get("removed"))
+        dsc_lines = f"\n- DSC status: healthy (phase={dsc_status.get('phase')}, {managed_count} managed components ready)"
+    else:
+        dsc_unhealthy = True
+        failing = dsc_status.get("failing_components", [])
+        components = dsc_status.get("components", {})
+        comp_lines = []
+        for c, info in components.items():
+            if info.get("removed"):
+                continue
+            status = "ready" if info.get("ready") else f"NOT READY ({info.get('reason', '')}: {info.get('message', '')[:100]})"
+            comp_lines.append(f"{c}={status}")
+        dsc_lines = f"\n- DSC status: UNHEALTHY (phase={dsc_status.get('phase')}) — failing: {', '.join(failing)}"
+        dsc_lines += f"\n    Components: {', '.join(comp_lines)}"
+
     prompt = f"""Nightly analysis for build {build_number} ({name}). Run every step below in order. Do NOT ask for confirmation. Do NOT skip any step.
 
 CONTEXT:
@@ -505,9 +585,17 @@ CONTEXT:
 - Flaky tests: {flaky_list}
 - Lock ticket: {jira_ticket or 'none'}
 - Previous build ticket: {prev_ticket or 'none'}
-- Cluster: {cluster_url or 'not configured'}{team_lines}
+- Cluster: {cluster_url or 'not configured'}{dsc_lines}{team_lines}
 - TFA report link: {report_artifact_url or 'not available'}
-
+{"" if not dsc_unhealthy else """
+DSC ALERT — The DataScienceCluster is UNHEALTHY. This likely explains test failures.
+In both the Slack message AND the deep analysis report, add a prominent banner at the TOP (before any test analysis):
+- Use :rotating_light: emoji and *bold* to make it unmissable
+- List which components are NOT READY and any condition errors
+- Explain that tests depending on these components are expected to fail
+- Check operator logs (oc logs deployment/rhods-operator -n redhat-ods-operator --tail=100) for root cause
+- Link to any Jira tickets about the operator/DSC issue
+"""}
 STEP 1 — INVESTIGATE EACH REAL FAILURE
 For each real failure listed above, do ALL of the following (skip nothing):
 1a. Read the MD report section for this test — note error message and failure category.
@@ -556,7 +644,7 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
 5d. Write the Slack analysis to {slack_analysis_path} (the CI pipeline will post it via webhook).
     Do NOT use mcp__slack__post_message — that posts as the user, not the bot.
     The message MUST include all of these sections:
-    - Header: "*NOTE: _This is an Agentic-AI generated message_*" then Jira link, stats (total/passed/failed/flaky), cluster health.
+    - Header: "*NOTE: _This is an Agentic-AI generated message_*" then Jira link (use :jira: emoji, NOT :jira2:), stats (total/passed/failed/flaky), cluster health.
     - TFA report link: include "{report_artifact_url}" if available.
     - Deployment info: operator SHA, build date, RHOAI version, dashboard commit.
     - Failure clusters with root cause analysis — explain WHY, not just what. For each real failure, include the team @-mention from the CONTEXT above (copy the `<!subteam^...|...>` exactly as given).
@@ -564,7 +652,14 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
     - Related Jira tickets with current status and assignee.
     - Trend analysis: compare vs previous builds using thread data. Show trajectory.
     - Recovery notes: tests that were previously failing but now pass.
-    Use Slack formatting: *bold*, _italic_, `code`, :emoji:, bullet points.
+    Use Slack mrkdwn formatting (NOT markdown):
+    - Bold: *text* (single asterisks). NEVER use **text** (double asterisks — Slack renders them as literal **).
+    - Italic: _text_ (underscores).
+    - Code: `text` (backticks).
+    - Headings: Slack has NO heading syntax. Do NOT use # or ## or ###. Use *Bold Text* on its own line instead.
+    - Bullet points: use • or - (both work).
+    - Links: <url|text>.
+    - Emojis: :emoji_name:.
     Keep under 39000 characters (Slack message limit is 40000).
 
 5e. Verify: read {slack_analysis_path} and confirm it exists and has content.
@@ -575,9 +670,9 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
     return prompt
 
 
-def run_deep_analysis(build_number: str, product: str, skip_slack: bool = False) -> int:
+def run_deep_analysis(build_number: str, product: str, skip_slack: bool = False, dsc_status: dict | None = None) -> int:
     """Run Claude Code agent for the full workflow. Returns 0 on success."""
-    prompt = build_deep_analysis_prompt(build_number, product, skip_slack=skip_slack)
+    prompt = build_deep_analysis_prompt(build_number, product, skip_slack=skip_slack, dsc_status=dsc_status)
 
     if DEEP_ANALYSIS_OUTPUT.exists():
         DEEP_ANALYSIS_OUTPUT.unlink()
@@ -610,6 +705,25 @@ def run_deep_analysis(build_number: str, product: str, skip_slack: bool = False)
 
     log(f"Deep analysis: agent wrote {size} bytes to {DEEP_ANALYSIS_OUTPUT}")
     return 0
+
+
+def postprocess_slack_analysis(build_number: str, product: str):
+    """Convert any leftover markdown syntax in slack-analysis.txt to Slack mrkdwn."""
+    name = product.upper()
+    path = PROJECT_ROOT / "reports" / "current" / name / "slack-analysis.txt"
+    if not path.exists():
+        return
+    text = path.read_text()
+    original = text
+    # **bold** → *bold* (but not inside code blocks)
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    # ### heading / ## heading / # heading → *heading* on its own line
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+    # :jira2: → :jira:
+    text = text.replace(':jira2:', ':jira:')
+    if text != original:
+        path.write_text(text)
+        log("Slack analysis: converted markdown → Slack mrkdwn")
 
 
 def inject_deep_analysis(build_number: str, product: str, jira_ticket: str) -> int:
@@ -675,6 +789,7 @@ def main():
     # Setup
     setup_tracer()
     setup_cluster_access(product, build_number)
+    dsc_status = check_dsc_status()
     setup_frontend_repo()
 
     # Phase 1: Automated analysis
@@ -698,7 +813,9 @@ def main():
         log("")
         log("Phase 2: Agent workflow (Claude Code)")
         log("-" * 40)
-        deep_rc = run_deep_analysis(build_number, product, skip_slack=skip_slack)
+        deep_rc = run_deep_analysis(build_number, product, skip_slack=skip_slack, dsc_status=dsc_status)
+
+        postprocess_slack_analysis(build_number, product)
 
         # Fallback: if agent wrote findings but didn't inject them, do it here
         if deep_rc == 0 and DEEP_ANALYSIS_OUTPUT.exists():
