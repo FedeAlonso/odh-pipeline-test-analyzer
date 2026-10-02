@@ -442,7 +442,7 @@ def extract_phase1_context(build_number: str, product: str) -> dict:
     name = product.upper()
     md_path = PROJECT_ROOT / "reports" / "current" / name / f"latest-build-{build_number}.md"
 
-    context = {"failures": [], "flaky": [], "jira_ticket": "", "team_mentions": {}}
+    context = {"failures": [], "flaky": [], "jira_ticket": "", "team_mentions": {}, "pipeline_failure": ""}
 
     if not md_path.exists():
         return context
@@ -469,6 +469,11 @@ def extract_phase1_context(build_number: str, product: str) -> dict:
             mention = resolve_team_mention(file_path, ownership)
             if mention:
                 context["team_mentions"][test_name] = mention
+
+    # Extract pipeline failure step from MD report
+    step_match = re.search(r"\*\*Failed Step:\*\*\s*`([^`]+)`", content)
+    if step_match:
+        context["pipeline_failure"] = step_match.group(1)
 
     # Extract Jira lock ticket from file (written by comprehensive_analysis.py)
     ticket_file = Path("/app/jira-ticket.txt")
@@ -536,6 +541,7 @@ def build_deep_analysis_prompt(build_number: str, product: str, skip_slack: bool
 
     failures_list = ", ".join(context["failures"]) if context["failures"] else "none"
     flaky_count = len(context["flaky"])
+    pipeline_failure = context.get("pipeline_failure", "")
 
     team_mentions = context.get("team_mentions", {})
     team_lines = ""
@@ -583,6 +589,7 @@ CONTEXT:
 - Videos: {videos_dir}/
 - Real failures: {failures_list}
 - Flaky tests (passed on retry): {flaky_count}
+- Pipeline failure step: {pipeline_failure or 'none (pipeline succeeded)'}
 - Lock ticket: {jira_ticket or 'none'}
 - Previous build ticket: {prev_ticket or 'none'}
 - Cluster: {cluster_url or 'not configured'}{dsc_lines}{team_lines}
@@ -645,6 +652,7 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
     Do NOT use mcp__slack__post_message — that posts as the user, not the bot.
     The message MUST include all of these sections:
     - Header: "*NOTE: _This is an Agentic-AI generated message_*" then Jira link (use :jira: emoji, NOT :jira2:), stats (total/passed/failed/flaky count), cluster health.
+    - If pipeline failed, use the specific step name from CONTEXT (e.g. "Validate RHOAI Health Failed", "Deploy RHOAI operator Failed"). Do NOT use generic labels like "INFRASTRUCTURE FAILURE".
     - Flaky tests: only mention the COUNT in the stats line (e.g. "flaky: 3"). Do NOT list individual flaky test names anywhere in the Slack message.
     - TFA report link: include "{report_artifact_url}" if available.
     - Deployment info: operator SHA, build date, RHOAI version, dashboard commit.
