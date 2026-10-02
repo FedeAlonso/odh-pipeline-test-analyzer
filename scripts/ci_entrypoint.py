@@ -580,6 +580,18 @@ def build_deep_analysis_prompt(build_number: str, product: str, skip_slack: bool
         dsc_lines = f"\n- DSC status: UNHEALTHY (phase={dsc_status.get('phase')}) — failing: {', '.join(failing)}"
         dsc_lines += f"\n    Components: {', '.join(comp_lines)}"
 
+    dsc_alert_block = ""
+    if dsc_unhealthy:
+        dsc_alert_block = (
+            "\nDSC ALERT -- The DataScienceCluster is UNHEALTHY. This likely explains test failures."
+            "\nIn both the Slack message AND the deep analysis report, add a prominent banner at the TOP (before any test analysis):"
+            "\n- Use :rotating_light: emoji and *bold* to make it unmissable"
+            "\n- List which components are NOT READY and any condition errors"
+            "\n- Explain that tests depending on these components are expected to fail"
+            "\n- Check operator logs (oc logs deployment/rhods-operator -n redhat-ods-operator --tail=100) for root cause"
+            "\n- Link to any Jira tickets about the operator/DSC issue\n"
+        )
+
     prompt = f"""Nightly analysis for build {build_number} ({name}). Run every step below in order. Do NOT ask for confirmation. Do NOT skip any step.
 
 CONTEXT:
@@ -594,15 +606,7 @@ CONTEXT:
 - Previous build ticket: {prev_ticket or 'none'}
 - Cluster: {cluster_url or 'not configured'}{dsc_lines}{team_lines}
 - TFA report link: {report_artifact_url or 'not available'}
-{"" if not dsc_unhealthy else """
-DSC ALERT — The DataScienceCluster is UNHEALTHY. This likely explains test failures.
-In both the Slack message AND the deep analysis report, add a prominent banner at the TOP (before any test analysis):
-- Use :rotating_light: emoji and *bold* to make it unmissable
-- List which components are NOT READY and any condition errors
-- Explain that tests depending on these components are expected to fail
-- Check operator logs (oc logs deployment/rhods-operator -n redhat-ods-operator --tail=100) for root cause
-- Link to any Jira tickets about the operator/DSC issue
-"""}
+{dsc_alert_block}
 STEP 1 — INVESTIGATE EACH REAL FAILURE
 For each real failure listed above, do ALL of the following (skip nothing):
 1a. Read the MD report section for this test — note error message and failure category.
