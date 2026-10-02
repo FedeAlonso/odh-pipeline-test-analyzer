@@ -303,7 +303,7 @@ The message must include:
 8. **Historical context** — reference relevant discussions from previous build threads (who is working on what, what was decided, what's blocking)
 9. **Reclassifications** — if deep analysis revealed some "real" failures are actually flaky (passed on retry), call this out with the corrected count
 
-Use Slack formatting: `*bold*`, `_italic_`, `` `code` ``, `:emoji:`, bullet points. Link to Jira tickets, PRs, and previous thread messages where relevant.
+Use Slack formatting: `*bold*` (single asterisks, NOT `**`), `_italic_`, `` `code` ``, `:emoji:`, bullet points. No `###` headings (Slack has none — use `*bold line*` instead). Use `:jira:` emoji, NEVER `:jira2:` (it doesn't exist in this workspace). Link to Jira tickets, PRs, and previous thread messages where relevant.
 
 Always start the message with:
 ```
