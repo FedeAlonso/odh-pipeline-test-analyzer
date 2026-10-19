@@ -75,6 +75,8 @@ def format_mention(team: dict) -> str:
     gid = team.get("slack_group_id", "")
     handle = team.get("slack_handle", "")
     if gid and handle:
+        if os.getenv("SUPPRESS_SLACK_MENTIONS", "").lower() in ("true", "1"):
+            return f"@{handle}"
         return f"<!subteam^{gid}|{handle}>"
     return handle or team.get("name", "Unknown")
 

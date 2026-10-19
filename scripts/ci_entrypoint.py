@@ -493,6 +493,8 @@ def resolve_team_mention(file_path: str, ownership: dict | None) -> str:
     gid = target_team.get("slack_group_id", "")
     handle = target_team.get("slack_handle", "")
     if gid and handle:
+        if os.getenv("SUPPRESS_SLACK_MENTIONS", "").lower() in ("true", "1"):
+            return f"@{handle}"
         return f"<!subteam^{gid}|{handle}>"
     return handle or ""
 
@@ -702,10 +704,15 @@ STEP 5 — WRITE SLACK ANALYSIS (do NOT post — Jenkins posts it via webhook as
 This is the most important step. The Slack message must be a FULL ANALYSIS, not a summary.
 
 5a. Search for the Jenkins Bot message:
-    Use mcp__slack__search_messages with query "dashboard-e2e-tests/{build_number}" to find the bot's build notification.
+    Search BOTH channels (transition period — old builds are in the old channel):
+    - mcp__slack__search_messages with query "dashboard-e2e-tests/{build_number} in:dashboard-build-notifications"
+    - mcp__slack__search_messages with query "dashboard-e2e-tests/{build_number} in:team-openshift-ai-dashboard"
 
 5b. Get historical context:
-    Use mcp__slack__search_messages to find the 5 previous builds' bot messages.
+    Search BOTH channels for previous build notifications:
+    - mcp__slack__search_messages with query "from:RHOAI Jenkins Bot in:dashboard-build-notifications" (limit 10)
+    - mcp__slack__search_messages with query "from:RHOAI Jenkins Bot in:team-openshift-ai-dashboard" (limit 10)
+    Deduplicate by build number (same build may appear in both channels).
     Use mcp__slack__get_thread on each to read thread replies.
 
 5c. Enrich with external context:
