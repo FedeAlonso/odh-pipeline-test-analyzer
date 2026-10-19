@@ -44,6 +44,8 @@ import os
 import re
 import subprocess
 import sys
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -73,6 +75,78 @@ def has_claude_auth() -> bool:
     return False
 
 
+def _validate_slack_tokens(xoxc: str, xoxd: str) -> tuple[bool, str]:
+    """Call Slack auth.test to verify tokens are valid. Returns (ok, detail)."""
+    req = urllib.request.Request(
+        "https://slack.com/api/auth.test",
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {xoxc}",
+            "Cookie": f"d={xoxd}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        data=b"",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read())
+    except (urllib.error.URLError, OSError) as exc:
+        return False, f"network error: {exc}"
+    except Exception as exc:
+        return False, f"unexpected error: {exc}"
+
+    if not body.get("ok"):
+        error = body.get("error", "unknown")
+        return False, f"auth.test failed: {error} (tokens likely expired)"
+    team = body.get("team", "?")
+    user = body.get("user", "?")
+    return True, f"authenticated as {user} in workspace {team}"
+
+
+def _validate_and_configure_slack_mcp(config: dict) -> bool:
+    """Validate Slack tokens and configure MCP server if valid. Returns True if configured."""
+    xoxc = os.getenv("SLACK_XOXC_TOKEN", "")
+    xoxd = os.getenv("SLACK_XOXD_TOKEN", "")
+
+    if not xoxc or not xoxd:
+        missing = []
+        if not xoxc:
+            missing.append("SLACK_XOXC_TOKEN")
+        if not xoxd:
+            missing.append("SLACK_XOXD_TOKEN")
+        log(f"MCP: Slack SKIPPED — missing env vars: {', '.join(missing)}")
+        return False
+
+    if not xoxc.startswith("xoxc-"):
+        log(f"MCP: Slack WARNING — SLACK_XOXC_TOKEN doesn't start with 'xoxc-' (got '{xoxc[:10]}...')")
+    if len(xoxd) < 20:
+        log(f"MCP: Slack WARNING — SLACK_XOXD_TOKEN looks too short ({len(xoxd)} chars)")
+
+    mcp_script = Path("/opt/slack-mcp/slack_mcp_server.py")
+    if not mcp_script.exists():
+        log(f"MCP: Slack SKIPPED — server script not found at {mcp_script}")
+        return False
+
+    ok, detail = _validate_slack_tokens(xoxc, xoxd)
+    if not ok:
+        log(f"MCP: Slack SKIPPED — {detail}")
+        log("MCP: Slack tokens may need rotation — see RHOAIENG-97002")
+        return False
+
+    log(f"MCP: Slack tokens valid ({detail})")
+    config["mcpServers"]["slack"] = {
+        "command": sys.executable,
+        "args": [str(mcp_script)],
+        "env": {
+            "SLACK_XOXC_TOKEN": xoxc,
+            "SLACK_XOXD_TOKEN": xoxd,
+            "MCP_TRANSPORT": "stdio",
+        },
+    }
+    log("MCP: Slack server configured")
+    return True
+
+
 def configure_mcp_servers():
     """Write MCP server config to ~/.claude.json with actual token values from env."""
     home = Path(os.environ.get("HOME", "/opt/app-root/src"))
@@ -82,21 +156,7 @@ def configure_mcp_servers():
 
     # Slack MCP — configured when SLACK_XOXC_TOKEN and SLACK_XOXD_TOKEN are set.
     # Session tokens (xoxc/xoxd) expire every 2-4 weeks; refresh in Vault when needed.
-    xoxc = os.getenv("SLACK_XOXC_TOKEN", "")
-    xoxd = os.getenv("SLACK_XOXD_TOKEN", "")
-    if xoxc and xoxd:
-        config["mcpServers"]["slack"] = {
-            "command": sys.executable,
-            "args": ["/opt/slack-mcp/slack_mcp_server.py"],
-            "env": {
-                "SLACK_XOXC_TOKEN": xoxc,
-                "SLACK_XOXD_TOKEN": xoxd,
-                "MCP_TRANSPORT": "stdio",
-            },
-        }
-        log("MCP: Slack server configured")
-    else:
-        log("MCP: Slack server skipped (no xoxc/xoxd tokens)")
+    slack_ok = _validate_and_configure_slack_mcp(config)
 
     # Kubernetes MCP — needs KUBECONFIG or ~/.kube/config
     kubeconfig = os.getenv("KUBECONFIG", str(home / ".kube" / "config"))
