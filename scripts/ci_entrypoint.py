@@ -684,7 +684,7 @@ For each real failure listed above, do ALL of the following (skip nothing):
 
 STEP 2 — WRITE DEEP ANALYSIS
 Write findings to {DEEP_ANALYSIS_OUTPUT} under a `## Deep Analysis` heading.
-For each failure cluster, include: root cause, evidence, related PRs (with status), related Jira tickets (with status), trend vs previous builds, recommended action.
+For each failure pattern, include: root cause, evidence, related PRs (with status), related Jira tickets (with status), trend vs previous builds, recommended action.
 
 STEP 3 — INJECT INTO REPORTS AND UPLOAD TO JIRA
 Run this exact command:
@@ -727,7 +727,7 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
     - Flaky tests: only mention the COUNT in the stats line (e.g. "flaky: 3"). Do NOT list individual flaky test names anywhere in the Slack message.
     - TFA report link: include "{report_artifact_url}" if available.
     - Deployment info: operator SHA, build date, RHOAI version, dashboard commit.
-    - Failure clusters with root cause analysis — explain WHY, not just what. For each real failure, include the team @-mention from the CONTEXT above (copy the `<!subteam^...|...>` exactly as given).
+    - Failure patterns with root cause analysis — explain WHY, not just what. For each real failure, include the team @-mention from the CONTEXT above (copy the `<!subteam^...|...>` exactly as given).
     - Related PRs with status (merged/open) and whether the fix is in this build's image.
     - Related Jira tickets with current status and assignee.
     - Trend analysis: compare vs previous builds using thread data. Show trajectory.

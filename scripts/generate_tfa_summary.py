@@ -147,7 +147,7 @@ def parse_report(md_path: Path) -> dict:
             result["failures"].append({"name": test_name, "file_path": file_path})
 
     cluster_header = re.compile(
-        r"^### Failure Cluster \d+:\s*(\S+)\s*—",
+        r"^### Failure (?:Cluster|Pattern) \d+:\s*(\S+)\s*—",
         re.MULTILINE,
     )
     root_cause_line = re.compile(r"^\*\*Root cause:\*\*\s*(.+)", re.MULTILINE)

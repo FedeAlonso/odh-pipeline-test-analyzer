@@ -211,13 +211,13 @@ For **every** uninvestigated real failure, complete ALL of the following steps:
 
 #### Post results to Jira
 
-Post results as **one Jira comment per failure cluster** on the lock ticket. Group tests that share the same root cause into a single comment (e.g., 8 model serving tests all broken by the same PR, 3 MLflow tests caused by the same DSC config issue). Each comment should be self-contained with full context.
+Post results as **one Jira comment per failure pattern** on the lock ticket. Group tests that share the same root cause into a single comment (e.g., 8 model serving tests all broken by the same PR, 3 MLflow tests caused by the same DSC config issue). Each comment should be self-contained with full context.
 
 ### 4c. Update reports with deep analysis findings
 
 After the deep analysis completes, **update both the MD and HTML reports**. The reports are the permanent record and must contain the complete investigation — not just the automated script output.
 
-Write a markdown file with your deep analysis findings under a `## 🔬 Deep Analysis` heading. For each failure cluster, include:
+Write a markdown file with your deep analysis findings under a `## 🔬 Deep Analysis` heading. For each failure pattern, include:
 - **Root cause** — what actually went wrong, not just the error message
 - **Evidence** — what you found in screenshots, videos, console logs, and cluster state
 - **Related PRs** — links to PRs that caused, fixed, or are related to the failure, with their status (merged/open/closed)
@@ -295,8 +295,8 @@ The message must include:
 
 1. **Header** — disclaimer line, Jira link, overall stats (total/passed/failed/flaky), cluster health, pipeline failure
 2. **Operator and image info** — pass `image_metadata` (from tracer) to `compose_slack_message()` / `build_slack_analysis()` so the `:gear: Deployment Info` section renders automatically. It shows: operator SHA + build date + RHOAI version + build notification link (or "not found"), dashboard commit with GitHub link, FBC fragment. If the operator is stale (built days ago), call it out — fixes merged after the image build won't be present.
-3. **Failure clusters with root cause analysis** — group failures by root cause, explain WHY each cluster fails (not just the error message), link to the specific PR or config change that caused it. **Always include the owning scrum team @-mention** next to each failure by resolving the test file path against `team-ownership.json` in the odh-dashboard repo (`packages/cypress/cypress/tests/e2e/team-ownership.json`). Use the Slack subteam syntax `<!subteam^GROUP_ID>` with the `slack_group_id` from the mapping. Match test file paths against `path_patterns` entries. This is mandatory — never omit team mentions from failure lines.
-4. **Related PRs** — for each failure cluster, link to PRs that caused, fix, or are related to the failures. Include PR status (merged/open), author, and whether the PR is in the deployed image.
+3. **Failure patterns with root cause analysis** — group failures by root cause, explain WHY each pattern fails (not just the error message), link to the specific PR or config change that caused it. **Always include the owning scrum team @-mention** next to each failure by resolving the test file path against `team-ownership.json` in the odh-dashboard repo (`packages/cypress/cypress/tests/e2e/team-ownership.json`). Use the Slack subteam syntax `<!subteam^GROUP_ID>` with the `slack_group_id` from the mapping. Match test file paths against `path_patterns` entries. This is mandatory — never omit team mentions from failure lines.
+4. **Related PRs** — for each failure pattern, link to PRs that caused, fix, or are related to the failures. Include PR status (merged/open), author, and whether the PR is in the deployed image.
 5. **Related Jira tickets** — link to existing bugs with their current status. If a ticket was discussed in previous threads, summarize the latest status (who's assigned, what's the latest comment, is a fix merged).
 6. **Trend analysis** — compare vs previous builds. What improved? What regressed? What's persistent? Use the historical thread data to show the trajectory (e.g., "Model serving: 8 failures in #936 → 3 in #942 → 1 in #969 → 6 in #992 (regression)")
 7. **Recovery notes** — tests that were previously failing but are now passing, and why
