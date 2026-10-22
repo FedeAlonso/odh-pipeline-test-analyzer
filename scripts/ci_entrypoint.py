@@ -662,7 +662,7 @@ CONTEXT:
 - Screenshots: {screenshots_dir}/
 - Videos: {videos_dir}/
 - Real failures: {failures_list}
-- Flaky tests (passed on retry): {flaky_count}
+
 - Pipeline failure step: {pipeline_failure or 'none (pipeline succeeded)'}
 - Lock ticket: {jira_ticket or 'none'}
 - Previous build ticket: {prev_ticket or 'none'}
@@ -722,9 +722,9 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
 5d. Write the Slack analysis to {slack_analysis_path} (the CI pipeline will post it via webhook).
     Do NOT use mcp__slack__post_message — that posts as the user, not the bot.
     The message MUST include all of these sections:
-    - Header: "*NOTE: _This is an Agentic-AI generated message_*" then Jira link (use :jira: emoji, NOT :jira2:), stats (total/passed/failed/flaky count), cluster health.
+    - Header: "*NOTE: _This is an Agentic-AI generated message_*" then Jira link (use :jira: emoji, NOT :jira2:), stats (total/passed/failed), cluster health.
     - If pipeline failed, use the specific step name from CONTEXT (e.g. "Validate RHOAI Health Failed", "Deploy RHOAI operator Failed"). Do NOT use generic labels like "INFRASTRUCTURE FAILURE".
-    - Flaky tests: only mention the COUNT in the stats line (e.g. "flaky: 3"). Do NOT list individual flaky test names anywhere in the Slack message.
+    - Flaky tests: NEVER mention flaky tests at all. No count, no names, no "Flaky Tests" section, no "passed on retry" references. The word "flaky" must NOT appear in the Slack message.
     - TFA report link: include "{report_artifact_url}" if available.
     - Deployment info: operator SHA, build date, RHOAI version, dashboard commit.
     - Failure patterns with root cause analysis — explain WHY, not just what. For each real failure, include the team @-mention from the CONTEXT above (copy the `<!subteam^...|...>` exactly as given).
