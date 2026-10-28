@@ -698,29 +698,54 @@ python scripts/post_analysis_summaries.py jira --ticket {jira_ticket} --build {b
 """
 
     slack_analysis_path = f"reports/current/{name}/slack-analysis.txt"
+    slack_context_log = f"reports/current/{name}/slack-context-log.txt"
     if not skip_slack:
         prompt += f"""
-STEP 5 — WRITE SLACK ANALYSIS (do NOT post — Jenkins posts it via webhook as the bot)
-This is the most important step. The Slack message must be a FULL ANALYSIS, not a summary.
+STEP 5 — GATHER SLACK & JIRA CONTEXT, THEN WRITE SLACK ANALYSIS
 
-5a. Search for the Jenkins Bot message:
+This step has 3 phases: GATHER → ENRICH → WRITE. You MUST complete all 3. Do NOT skip to writing.
+The context log at {slack_context_log} is mandatory — it proves you gathered context and lets us diagnose issues.
+
+--- PHASE 1: GATHER SLACK CONTEXT (mandatory — do NOT skip) ---
+
+5a. Search for the Jenkins Bot message for THIS build:
     Search BOTH channels (transition period — old builds are in the old channel):
     - mcp__slack__search_messages with query "dashboard-e2e-tests/{build_number} in:dashboard-build-notifications"
     - mcp__slack__search_messages with query "dashboard-e2e-tests/{build_number} in:team-openshift-ai-dashboard"
+    Write to {slack_context_log}: "[SEARCH] Current build #{build_number}: found=<yes/no>, channel=<channel>, thread_ts=<ts>"
 
-5b. Get historical context:
+5b. Get historical context from the last 5 builds:
     Search BOTH channels for previous build notifications:
     - mcp__slack__search_messages with query "from:RHOAI Jenkins Bot in:dashboard-build-notifications" (limit 10)
     - mcp__slack__search_messages with query "from:RHOAI Jenkins Bot in:team-openshift-ai-dashboard" (limit 10)
-    Deduplicate by build number (same build may appear in both channels).
-    Use mcp__slack__get_thread on each to read thread replies.
+    Deduplicate by build number.
+    For each of the last 5 builds, use mcp__slack__get_thread to read ALL thread replies.
+    Write to {slack_context_log} for EACH thread:
+    "[THREAD] Build #<N>: <reply_count> replies, participants: <names>, topics: <one-line summary>"
+    "[THREAD] Build #<N>: Jira tickets mentioned: <RHOAIENG-XXXXX, ...>"
+    "[THREAD] Build #<N>: PRs mentioned: <PR URLs>"
+    "[THREAD] Build #<N>: Key discussion: <quote or summary of important context>"
 
-5c. Enrich with external context:
-    For each Jira ticket referenced in threads, fetch current status via Jira API.
-    For each PR referenced, check if it's merged/open/closed.
+    If mcp__slack__search_messages returns empty or errors, write: "[SEARCH] FAILED: <error message>"
+    If mcp__slack__get_thread returns empty, write: "[THREAD] Build #<N>: no replies"
 
-5d. Write the Slack analysis to {slack_analysis_path} (the CI pipeline will post it via webhook).
+--- PHASE 2: ENRICH WITH JIRA CONTEXT (mandatory — do NOT skip) ---
+
+5c. For every Jira ticket found in Slack threads (from Phase 1), fetch its current status:
+    Use the Jira API: curl -s -u "$JIRA_USER:$JIRA_TOKEN" "https://redhat.atlassian.net/rest/api/3/issue/<KEY>?fields=summary,status,assignee,comment"
+    Write to {slack_context_log} for EACH ticket:
+    "[JIRA] <KEY>: status=<status>, assignee=<name>, summary=<summary>"
+    "[JIRA] <KEY>: latest comment by <author> (<date>): <first 200 chars>"
+
+    For every PR referenced in threads, check if merged/open/closed.
+    Write to {slack_context_log}: "[PR] <URL>: status=<merged/open/closed>"
+
+--- PHASE 3: WRITE THE SLACK MESSAGE (uses context from Phases 1-2) ---
+
+5d. Read {slack_context_log} to refresh your memory of ALL gathered context.
+    Write the Slack analysis to {slack_analysis_path} (the CI pipeline will post it via webhook).
     Do NOT use mcp__slack__post_message — that posts as the user, not the bot.
+
     The message MUST include all of these sections:
     - Header: "*NOTE: _This is an Agentic-AI generated message_*" then Jira link (use :jira: emoji, NOT :jira2:), stats (total/passed/failed), cluster health.
     - If pipeline failed, use the specific step name from CONTEXT (e.g. "Validate RHOAI Health Failed", "Deploy RHOAI operator Failed"). Do NOT use generic labels like "INFRASTRUCTURE FAILURE".
@@ -728,10 +753,12 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
     - TFA report link: include "{report_artifact_url}" if available.
     - Deployment info: operator SHA, build date, RHOAI version, dashboard commit.
     - Failure patterns with root cause analysis — explain WHY, not just what. For each real failure, include the team @-mention from the CONTEXT above (copy the `<!subteam^...|...>` exactly as given).
-    - Related PRs with status (merged/open) and whether the fix is in this build's image.
-    - Related Jira tickets with current status and assignee.
-    - Trend analysis: compare vs previous builds using thread data. Show trajectory.
+    - Related PRs with status (merged/open) and whether the fix is in this build's image. USE THE PR DATA FROM PHASE 2.
+    - Related Jira tickets with ACTUAL current status and assignee FROM PHASE 2. NEVER write "status unknown".
+    - Trend analysis: compare vs previous builds using ACTUAL thread data from Phase 1. Reference what team members said. Show trajectory.
     - Recovery notes: tests that were previously failing but now pass.
+    - Historical context: reference specific discussions from previous threads — who said what, what decisions were made, what's blocking. USE THE THREAD DATA FROM PHASE 1.
+
     Use Slack mrkdwn formatting (NOT markdown):
     - Bold: *text* (single asterisks). NEVER use **text** (double asterisks — Slack renders them as literal **).
     - Italic: _text_ (underscores).
@@ -742,7 +769,10 @@ This is the most important step. The Slack message must be a FULL ANALYSIS, not 
     - Emojis: :emoji_name:.
     Keep under 39000 characters (Slack message limit is 40000).
 
-5e. Verify: read {slack_analysis_path} and confirm it exists and has content.
+5e. Verify BOTH files exist and have content:
+    - Read {slack_context_log} — it MUST have at least 5 lines starting with [SEARCH], [THREAD], or [JIRA].
+    - Read {slack_analysis_path} — it MUST exist and have content.
+    If {slack_context_log} has fewer than 5 tagged lines, you skipped Phase 1 or 2. Go back and redo them.
 """
     else:
         prompt += "\nSTEP 5 — SLACK: Skipped (no tokens configured).\n"
@@ -784,6 +814,25 @@ def run_deep_analysis(build_number: str, product: str, skip_slack: bool = False,
         return 1
 
     log(f"Deep analysis: agent wrote {size} bytes to {DEEP_ANALYSIS_OUTPUT}")
+
+    # Log Slack context gathering results
+    name = product.upper()
+    context_log = PROJECT_ROOT / "reports" / "current" / name / "slack-context-log.txt"
+    slack_analysis = PROJECT_ROOT / "reports" / "current" / name / "slack-analysis.txt"
+    if not skip_slack:
+        if context_log.exists():
+            content = context_log.read_text()
+            tagged = [l for l in content.splitlines() if l.startswith("[")]
+            log(f"Slack context log: {len(tagged)} tagged lines ({context_log.stat().st_size} bytes)")
+            for line in tagged[:10]:
+                log(f"  {line[:120]}")
+        else:
+            log("Slack context log: NOT WRITTEN — agent skipped Slack context gathering")
+        if slack_analysis.exists():
+            log(f"Slack analysis: {slack_analysis.stat().st_size} bytes")
+        else:
+            log("Slack analysis: NOT WRITTEN")
+
     return 0
 
 
