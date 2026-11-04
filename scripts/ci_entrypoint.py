@@ -746,18 +746,36 @@ The context log at {slack_context_log} is mandatory — it proves you gathered c
     Write the Slack analysis to {slack_analysis_path} (the CI pipeline will post it via webhook).
     Do NOT use mcp__slack__post_message — that posts as the user, not the bot.
 
-    The message MUST include all of these sections:
-    - Header: "*NOTE: _This is an Agentic-AI generated message_*" then Jira link (use :jira: emoji, NOT :jira2:), stats (total/passed/failed), cluster health.
-    - If pipeline failed, use the specific step name from CONTEXT (e.g. "Validate RHOAI Health Failed", "Deploy RHOAI operator Failed"). Do NOT use generic labels like "INFRASTRUCTURE FAILURE".
-    - Flaky tests: NEVER mention flaky tests at all. No count, no names, no "Flaky Tests" section, no "passed on retry" references. The word "flaky" must NOT appear in the Slack message.
-    - TFA report link: include "{report_artifact_url}" if available.
-    - Deployment info: operator SHA, build date, RHOAI version, dashboard commit.
-    - Failure patterns with root cause analysis — explain WHY, not just what. For each real failure, include the team @-mention from the CONTEXT above (copy the `<!subteam^...|...>` exactly as given).
-    - Related PRs with status (merged/open) and whether the fix is in this build's image. USE THE PR DATA FROM PHASE 2.
-    - Related Jira tickets with ACTUAL current status and assignee FROM PHASE 2. NEVER write "status unknown".
-    - Trend analysis: compare vs previous builds using ACTUAL thread data from Phase 1. Reference what team members said. Show trajectory.
-    - Recovery notes: tests that were previously failing but now pass.
-    - Historical context: reference specific discussions from previous threads — who said what, what decisions were made, what's blocking. USE THE THREAD DATA FROM PHASE 1.
+    The message must be SHORT and SCANNABLE — not a second report. The TFA report has all the detail.
+    It has exactly 5 sections:
+
+    SECTION 1 — HEADER:
+    "*NOTE: _This is an Agentic-AI generated message_*" then Jira link (use :jira: emoji, NOT :jira2:), stats (total/passed/failed), DSC status, cluster health, TFA report link ("{report_artifact_url}" if available).
+    If pipeline failed, use the specific step name from CONTEXT (e.g. "Validate RHOAI Health Failed"). Do NOT use generic labels like "INFRASTRUCTURE FAILURE".
+    Flaky tests: NEVER mention at all. No count, no names, no section. The word "flaky" must NOT appear.
+
+    SECTION 2 — DEPLOYMENT INFO:
+    Operator SHA, build date, RHOAI version, dashboard commit. If operator is stale, call it out.
+
+    SECTION 3 — FAILURE PATTERN SUMMARY:
+    One block per failure pattern, grouped by component/root cause. Each block:
+    *Component Name* (bold header line)
+    • Number of tests failed + test file names
+    • Super short error description — max 2 sentences
+    • Team @-mention (copy the `<!subteam^...|...>` from CONTEXT exactly as given). MANDATORY.
+    • New or persistent? (e.g. ":rotating_light: New" or "Persistent — seen in last 3 builds")
+    • Related Jira tickets with ACTUAL status and assignee FROM PHASE 2 (e.g. ":jira: <URL|KEY> (In Progress, @jane)")
+    • Related PRs with status and whether fix is in this image (e.g. ":github: <URL|PR #N title> (merged, not in this image)")
+    • Relevant Slack thread references if any
+
+    SECTION 4 — TRENDS:
+    One line per failure pattern showing trajectory across recent builds (e.g. "Model serving: 8→3→1→6 (regression)").
+    Only patterns that changed — don't list stable ones. USE ACTUAL thread data from Phase 1.
+
+    SECTION 5 — RECOVERY:
+    One line per test/group that was previously failing but now passes (e.g. ":white_check_mark: Pipelines: all passing again after 3 builds").
+
+    That's all. No separate "Related PRs" section, no "Historical context" section, no "Reclassifications" section.
 
     Use Slack mrkdwn formatting (NOT markdown):
     - Bold: *text* (single asterisks). NEVER use **text** (double asterisks — Slack renders them as literal **).
