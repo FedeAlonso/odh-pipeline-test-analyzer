@@ -372,7 +372,7 @@ async def analyze_component_build(component_name: str, framework: str,
                 'total_failures': analysis_results.get('total_failures', 0),
             }
             print(f"✅ Analyzed {analyzed_failures['total_failures']} failures")
-            print(f"   Found {len(analyzed_failures['failure_clusters'])} failure clusters")
+            print(f"   Found {len(analyzed_failures['failure_clusters'])} failure patterns")
             print(f"   Generated {len(analyzed_failures['recommendations'])} recommendations")
         except Exception as e:
             print(f"⚠️  Analysis failed: {e}")

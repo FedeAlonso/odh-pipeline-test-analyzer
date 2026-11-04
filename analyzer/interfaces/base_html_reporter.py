@@ -275,10 +275,10 @@ tr:hover { background:var(--bg2); }
             html_parts.append('</div>')
             html_parts.append('</div>')
 
-        # Failure clusters section
+        # Failure patterns section
         if root_causes:
             html_parts.append('<div class="section">')
-            html_parts.append(f'<h2>🔍 Failure Analysis ({len(root_causes)} clusters identified)</h2>')
+            html_parts.append(f'<h2>🔍 Failure Analysis ({len(root_causes)} patterns identified)</h2>')
 
             for i, rc in enumerate(root_causes[:10], 1):  # Show top 10 clusters
                 cluster_size = rc.get('cluster_size', 1)
@@ -340,7 +340,7 @@ tr:hover { background:var(--bg2); }
                 html_parts.append('</div>')
 
             if len(root_causes) > 10:
-                html_parts.append(f'<p class="text-muted">... and {len(root_causes) - 10} more failure clusters</p>')
+                html_parts.append(f'<p class="text-muted">... and {len(root_causes) - 10} more failure patterns</p>')
 
             html_parts.append('</div>')
 

@@ -75,6 +75,8 @@ def format_mention(team: dict) -> str:
     gid = team.get("slack_group_id", "")
     handle = team.get("slack_handle", "")
     if gid and handle:
+        if os.getenv("SUPPRESS_SLACK_MENTIONS", "").lower() in ("true", "1"):
+            return f"@{handle}"
         return f"<!subteam^{gid}|{handle}>"
     return handle or team.get("name", "Unknown")
 
@@ -145,7 +147,7 @@ def parse_report(md_path: Path) -> dict:
             result["failures"].append({"name": test_name, "file_path": file_path})
 
     cluster_header = re.compile(
-        r"^### Failure Cluster \d+:\s*(\S+)\s*—",
+        r"^### Failure (?:Cluster|Pattern) \d+:\s*(\S+)\s*—",
         re.MULTILINE,
     )
     root_cause_line = re.compile(r"^\*\*Root cause:\*\*\s*(.+)", re.MULTILINE)

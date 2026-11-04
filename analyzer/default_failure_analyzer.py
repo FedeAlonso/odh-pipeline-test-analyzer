@@ -225,7 +225,7 @@ class DefaultFailureAnalyzer:
         must_gather_data: Any = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Analyze a cluster of failures to find root cause
+        Analyze a pattern of failures to find root cause
 
         Returns root cause analysis with:
         - Category (setup, assertion, timeout, infrastructure)
@@ -380,7 +380,7 @@ class DefaultFailureAnalyzer:
             )
 
         return recommendations if recommendations else [
-            '✅ Analysis complete. Review failure clusters and suggestions above.'
+            '✅ Analysis complete. Review failure patterns and suggestions above.'
         ]
 
 
