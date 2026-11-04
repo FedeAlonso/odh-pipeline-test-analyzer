@@ -287,36 +287,43 @@ After posting to Jira, post a threaded reply on the matching "RHOAI Jenkins Bot"
 5. **Operator build notification lookup (RHOAI only)** — extract the operator SHA from `image_metadata['operator_bundle']['full_image_uri']`. Search `#rhoai-build-notifications` (channel ID `C07ANR2U56C`) via `mcp__slack__search_channel_messages` for the SHA digest. If found, store the message permalink as `rhoai_build_notification_url` in the analysis dict. If the channel is not accessible (different Slack workspace), set the field to `None` — the Slack message will show "_not found in #rhoai-build-notifications_".
 
 #### 6b. Write the Slack analysis message
-The Slack message must be **short and scannable**. The Jenkins Bot already posts the failure list, and the full TFA report (linked in the header) has all the deep analysis detail. The agent message adds context, not a second report.
+The Slack message is a **notification**, not a report. The TFA report (linked in the header) has all the detail. The agent message adds context in a scannable format.
 
-**Do NOT just run `post_analysis_summaries.py slack` and post the output.** That script generates a minimal summary. Instead, write the Slack message yourself using the context gathered in step 6a plus the deep analysis findings from step 4b — but keep it compact.
+**Target length: under 3000 characters. It MUST fit in ONE Slack message.** If your draft exceeds 4000 chars, cut it down.
+
+**Hard rules — violating any of these is a failure:**
+- NEVER include "Recommended Actions" or "Immediate Actions" sections.
+- NEVER include terminal commands (`oc`, `kubectl`, `curl`, etc.).
+- NEVER include multi-paragraph explanations or root cause deep-dives.
+- NEVER add extra sections beyond the 5 defined below.
+- NEVER mention flaky tests. No count, no names, no section. The word "flaky" must NOT appear.
+- NEVER split across multiple Slack messages. One message only.
+- NEVER use `---` horizontal rules or separators.
+- Error descriptions are MAX 2 sentences. If you wrote 3+, delete the extras.
 
 The message has exactly 5 sections:
 
-1. **Header** — disclaimer line, Jira link, overall stats (total/passed/failed), DSC status, cluster health, pipeline failure (use the specific step name, not generic labels), TFA report link.
-2. **Deployment Info** — operator SHA + build date + RHOAI version + build notification link (or "not found"), dashboard commit with GitHub link, FBC fragment. If the operator is stale (built days ago), call it out.
-3. **Failure Pattern Summary** — one block per failure pattern, grouped by component/root cause. Each block:
+1. **Header** (3-4 lines max):
+   - `*NOTE: _This is an Agentic-AI generated message_*`
+   - `:jira: <lock ticket link> | Total: N | Passed: N | Failed: N | :link: <TFA report link>`
+   - DSC status: one line summarizing what's broken (e.g., `:red_circle: DSC UNHEALTHY — ModelsAsAService NotReady, AIGateway 1/2`). Do NOT list every healthy component.
+   - Pipeline failure: one line if applicable.
+2. **Deployment Info** (2-3 lines max) — dashboard commit, operator version, key component ages if stale. One line per item, no tables.
+3. **Failure Pattern Summary** — one block per failure pattern. Each block is a bold header + bullet points ONLY:
    - `*Component Name*` (bold header line)
-   - `•` Number of tests failed + test file names (e.g., "3 tests: `testModelDeploy.cy.ts`, `testModelInference.cy.ts`, `testModelStatus.cy.ts`")
-   - `•` Super short error description — max 2 sentences explaining what went wrong.
-   - `•` Team @-mention — resolve the test file path against `team-ownership.json` in the odh-dashboard repo (`packages/cypress/cypress/tests/e2e/team-ownership.json`). Use `<!subteam^GROUP_ID|handle>` syntax. This is mandatory.
-   - `•` New or persistent? (e.g., ":rotating_light: New" or "Persistent — seen in last 3 builds")
-   - `•` Related Jira tickets with current status and assignee (e.g., ":jira: <URL|RHOAIENG-12345> (In Progress, @jane)")
-   - `•` Related PRs with status (e.g., ":github: <URL|PR #4521 Fix health check> (merged, not in this image)")
-   - `•` Relevant Slack thread references if any
-4. **Trends** — one line per failure pattern showing trajectory across recent builds (e.g., "Model serving: 8→3→1→6 (regression)"). Keep to patterns that changed — don't list stable ones.
-5. **Recovery** — one line per test/group that was previously failing but is now passing (e.g., ":white_check_mark: Pipelines: all passing again after 3 builds of failures").
+   - `•` N tests: `file1.cy.ts`, `file2.cy.ts`
+   - `•` Short error — max 2 sentences. What broke, not why in detail.
+   - `•` `<!subteam^GROUP_ID|@handle>` (mandatory team mention from `team-ownership.json`)
+   - `•` `:rotating_light: New` or `Persistent (last N builds)`
+   - `•` `:jira: <URL|KEY> (status, @assignee)` — one line per ticket
+   - `•` `:github: <URL|PR #N title> (merged/open, in image: yes/no)` — one line per PR
+   - That's ALL per pattern. No "Evidence", no "Timeline", no "Recommended Actions", no terminal commands.
+4. **Trends** — one line per pattern: "Component: N→N→N (regression/stable/improving)". Only patterns that changed.
+5. **Recovery** — one line per recovered group: `:white_check_mark: Component: passing again after N builds`
 
-That's all. No separate "Related PRs" section, no "Historical context" section, no "Reclassifications" section. PRs, Jiras, and context are folded into each failure pattern block. All detailed analysis lives in the TFA report.
+**NOTHING ELSE.** No "Actions Required", no "Key Takeaways", no "Summary", no closing remarks.
 
-Flaky tests: NEVER mention flaky tests at all. No count, no names, no section, no "passed on retry" references.
-
-Use Slack formatting: `*bold*` (single asterisks, NOT `**`), `_italic_`, `` `code` ``, `:emoji:`, bullet points. No `###` headings (Slack has none — use `*bold line*` instead). Use `:jira:` emoji, NEVER `:jira2:` (it doesn't exist in this workspace). Link to Jira tickets, PRs, and previous thread messages where relevant.
-
-Always start the message with:
-```
-*NOTE: _This is an Agentic-AI generated message_*
-```
+Use Slack formatting: `*bold*` (single asterisks, NOT `**`), `_italic_`, `` `code` ``, `:emoji:`, bullet points. No `###` headings — use `*Bold Text*` on its own line. Use `:jira:` emoji, NEVER `:jira2:`.
 
 Post using `mcp__slack__post_message` with the build's `thread_ts` value.
 

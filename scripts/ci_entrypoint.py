@@ -746,36 +746,48 @@ The context log at {slack_context_log} is mandatory — it proves you gathered c
     Write the Slack analysis to {slack_analysis_path} (the CI pipeline will post it via webhook).
     Do NOT use mcp__slack__post_message — that posts as the user, not the bot.
 
-    The message must be SHORT and SCANNABLE — not a second report. The TFA report has all the detail.
-    It has exactly 5 sections:
+    The message must be SHORT and SCANNABLE — a notification, not a report. The TFA report has all the detail.
+    TARGET LENGTH: under 3000 characters. It MUST fit in ONE Slack message. If your draft exceeds 4000 chars, you wrote too much — cut it down.
 
-    SECTION 1 — HEADER:
-    "*NOTE: _This is an Agentic-AI generated message_*" then Jira link (use :jira: emoji, NOT :jira2:), stats (total/passed/failed), DSC status, cluster health, TFA report link ("{report_artifact_url}" if available).
-    If pipeline failed, use the specific step name from CONTEXT (e.g. "Validate RHOAI Health Failed"). Do NOT use generic labels like "INFRASTRUCTURE FAILURE".
-    Flaky tests: NEVER mention at all. No count, no names, no section. The word "flaky" must NOT appear.
+    HARD RULES — VIOLATING ANY OF THESE IS A FAILURE:
+    - NEVER include "Recommended Actions" or "Immediate Actions" sections.
+    - NEVER include terminal commands (oc, kubectl, curl, etc.).
+    - NEVER include multi-paragraph explanations or root cause deep-dives.
+    - NEVER add extra sections beyond the 5 defined below.
+    - NEVER mention flaky tests. No count, no names, no section. The word "flaky" must NOT appear.
+    - NEVER split across multiple Slack messages. One message only.
+    - NEVER use "---" horizontal rules or separators.
+    - Error descriptions are MAX 2 sentences. If you wrote 3+, delete the extras.
 
-    SECTION 2 — DEPLOYMENT INFO:
-    Operator SHA, build date, RHOAI version, dashboard commit. If operator is stale, call it out.
+    The message has EXACTLY 5 sections:
+
+    SECTION 1 — HEADER (3-4 lines max):
+    "*NOTE: _This is an Agentic-AI generated message_*"
+    :jira: <lock ticket link> | Total: N | Passed: N | Failed: N | :link: <TFA report link>
+    DSC status: one line summarizing what's broken (e.g. ":red_circle: DSC UNHEALTHY — ModelsAsAService NotReady, AIGateway 1/2"). Do NOT list every healthy component.
+    Pipeline failure: one line if applicable (e.g. ":warning: Pipeline: `dashboardPostBuild` failed — NullPointerException").
+
+    SECTION 2 — DEPLOYMENT INFO (2-3 lines max):
+    Dashboard commit + operator version + key component ages if stale. One line per item, no tables.
 
     SECTION 3 — FAILURE PATTERN SUMMARY:
-    One block per failure pattern, grouped by component/root cause. Each block:
-    *Component Name* (bold header line)
-    • Number of tests failed + test file names
-    • Super short error description — max 2 sentences
-    • Team @-mention (copy the `<!subteam^...|...>` from CONTEXT exactly as given). MANDATORY.
-    • New or persistent? (e.g. ":rotating_light: New" or "Persistent — seen in last 3 builds")
-    • Related Jira tickets with ACTUAL status and assignee FROM PHASE 2 (e.g. ":jira: <URL|KEY> (In Progress, @jane)")
-    • Related PRs with status and whether fix is in this image (e.g. ":github: <URL|PR #N title> (merged, not in this image)")
-    • Relevant Slack thread references if any
+    One block per failure pattern. Each block is a bold header + bullet points ONLY:
+    *Component Name*
+    • N tests: `file1.cy.ts`, `file2.cy.ts`
+    • Short error — max 2 sentences. What broke, not why in detail.
+    • <!subteam^...|@team> (copy from CONTEXT exactly)
+    • :rotating_light: New — or "Persistent (last N builds)"
+    • :jira: <URL|KEY> (status, @assignee) — one line per ticket
+    • :github: <URL|PR #N title> (merged/open, in image: yes/no) — one line per PR
+    That's ALL per pattern. No "Evidence", no "Timeline", no "Recommended Actions", no terminal commands.
 
-    SECTION 4 — TRENDS:
-    One line per failure pattern showing trajectory across recent builds (e.g. "Model serving: 8→3→1→6 (regression)").
-    Only patterns that changed — don't list stable ones. USE ACTUAL thread data from Phase 1.
+    SECTION 4 — TRENDS (one line per pattern):
+    "Component: N→N→N (regression/stable/improving)" — only patterns that changed.
 
-    SECTION 5 — RECOVERY:
-    One line per test/group that was previously failing but now passes (e.g. ":white_check_mark: Pipelines: all passing again after 3 builds").
+    SECTION 5 — RECOVERY (one line per recovered group):
+    ":white_check_mark: Component: passing again after N builds"
 
-    That's all. No separate "Related PRs" section, no "Historical context" section, no "Reclassifications" section.
+    NOTHING ELSE. No "Actions Required", no "Key Takeaways", no "Summary", no closing remarks.
 
     Use Slack mrkdwn formatting (NOT markdown):
     - Bold: *text* (single asterisks). NEVER use **text** (double asterisks — Slack renders them as literal **).
