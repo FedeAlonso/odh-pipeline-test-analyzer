@@ -317,6 +317,7 @@ The message has exactly 5 sections:
    - `•` `:rotating_light: New` or `Persistent (last N builds)`
    - `•` `:jira: <URL|KEY> (status, @assignee)` — one line per ticket
    - `•` `:github: <URL|PR #N title> (merged/open, in image: yes/no)` — one line per PR
+   - `•` When mentioning a previous build, ALWAYS link to its Slack thread permalink (e.g., `discussed in <permalink|#3905 thread>`). Get permalinks from Phase 1 thread data. Mandatory.
    - That's ALL per pattern. No "Evidence", no "Timeline", no "Recommended Actions", no terminal commands.
 4. **Trends** — one line per pattern: "Component: N→N→N (regression/stable/improving)". Only patterns that changed.
 5. **Recovery** — one line per recovered group: `:white_check_mark: Component: passing again after N builds`

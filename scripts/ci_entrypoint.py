@@ -779,6 +779,7 @@ The context log at {slack_context_log} is mandatory — it proves you gathered c
     • :rotating_light: New — or "Persistent (last N builds)"
     • :jira: <URL|KEY> (status, @assignee) — one line per ticket
     • :github: <URL|PR #N title> (merged/open, in image: yes/no) — one line per PR
+    • When mentioning a previous build, ALWAYS link to its Slack thread permalink (e.g. "discussed in <permalink|#3905 thread>"). Get permalinks from Phase 1 thread data. MANDATORY.
     That's ALL per pattern. No "Evidence", no "Timeline", no "Recommended Actions", no terminal commands.
 
     SECTION 4 — TRENDS (one line per pattern):
