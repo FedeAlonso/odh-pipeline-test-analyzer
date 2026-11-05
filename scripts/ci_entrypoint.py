@@ -753,13 +753,14 @@ The context log at {slack_context_log} is mandatory — it proves you gathered c
     - NEVER include "Recommended Actions" or "Immediate Actions" sections.
     - NEVER include terminal commands (oc, kubectl, curl, etc.).
     - NEVER include multi-paragraph explanations or root cause deep-dives.
-    - NEVER add extra sections beyond the 5 defined below.
+    - NEVER add extra sections beyond the 4 defined below.
+    - NEVER include deployment info (operator SHA, dashboard commit, component ages) — it's in the TFA report.
     - NEVER mention flaky tests. No count, no names, no section. The word "flaky" must NOT appear.
     - NEVER split across multiple Slack messages. One message only.
     - NEVER use "---" horizontal rules or separators.
     - Error descriptions are MAX 2 sentences. If you wrote 3+, delete the extras.
 
-    The message has EXACTLY 5 sections:
+    The message has EXACTLY 4 sections:
 
     SECTION 1 — HEADER (3-4 lines max):
     "*NOTE: _This is an Agentic-AI generated message_*"
@@ -767,10 +768,7 @@ The context log at {slack_context_log} is mandatory — it proves you gathered c
     DSC status: one line summarizing what's broken (e.g. ":red_circle: DSC UNHEALTHY — ModelsAsAService NotReady, AIGateway 1/2"). Do NOT list every healthy component.
     Pipeline failure: one line if applicable (e.g. ":warning: Pipeline: `dashboardPostBuild` failed — NullPointerException").
 
-    SECTION 2 — DEPLOYMENT INFO (2-3 lines max):
-    Dashboard commit + operator version + key component ages if stale. One line per item, no tables.
-
-    SECTION 3 — FAILURE PATTERN SUMMARY:
+    SECTION 2 — FAILURE PATTERN SUMMARY:
     One block per failure pattern. Each block is a bold header + bullet points ONLY:
     *Component Name*
     • N tests: `file1.cy.ts`, `file2.cy.ts`
@@ -782,10 +780,10 @@ The context log at {slack_context_log} is mandatory — it proves you gathered c
     • When mentioning a previous build, ALWAYS link to its Slack thread permalink (e.g. "discussed in <permalink|#3905 thread>"). Get permalinks from Phase 1 thread data. MANDATORY.
     That's ALL per pattern. No "Evidence", no "Timeline", no "Recommended Actions", no terminal commands.
 
-    SECTION 4 — TRENDS (one line per pattern):
+    SECTION 3 — TRENDS (one line per pattern):
     "Component: N→N→N (regression/stable/improving)" — only patterns that changed.
 
-    SECTION 5 — RECOVERY (one line per recovered group):
+    SECTION 4 — RECOVERY (one line per recovered group):
     ":white_check_mark: Component: passing again after N builds"
 
     NOTHING ELSE. No "Actions Required", no "Key Takeaways", no "Summary", no closing remarks.

@@ -295,21 +295,21 @@ The Slack message is a **notification**, not a report. The TFA report (linked in
 - NEVER include "Recommended Actions" or "Immediate Actions" sections.
 - NEVER include terminal commands (`oc`, `kubectl`, `curl`, etc.).
 - NEVER include multi-paragraph explanations or root cause deep-dives.
-- NEVER add extra sections beyond the 5 defined below.
+- NEVER add extra sections beyond the 4 defined below.
+- NEVER include deployment info (operator SHA, dashboard commit, component ages) — it's in the TFA report.
 - NEVER mention flaky tests. No count, no names, no section. The word "flaky" must NOT appear.
 - NEVER split across multiple Slack messages. One message only.
 - NEVER use `---` horizontal rules or separators.
 - Error descriptions are MAX 2 sentences. If you wrote 3+, delete the extras.
 
-The message has exactly 5 sections:
+The message has exactly 4 sections:
 
 1. **Header** (3-4 lines max):
    - `*NOTE: _This is an Agentic-AI generated message_*`
    - `:jira: <lock ticket link> | Total: N | Passed: N | Failed: N | :link: <TFA report link>`
    - DSC status: one line summarizing what's broken (e.g., `:red_circle: DSC UNHEALTHY — ModelsAsAService NotReady, AIGateway 1/2`). Do NOT list every healthy component.
    - Pipeline failure: one line if applicable.
-2. **Deployment Info** (2-3 lines max) — dashboard commit, operator version, key component ages if stale. One line per item, no tables.
-3. **Failure Pattern Summary** — one block per failure pattern. Each block is a bold header + bullet points ONLY:
+2. **Failure Pattern Summary** — one block per failure pattern. Each block is a bold header + bullet points ONLY:
    - `*Component Name*` (bold header line)
    - `•` N tests: `file1.cy.ts`, `file2.cy.ts`
    - `•` Short error — max 2 sentences. What broke, not why in detail.
@@ -319,8 +319,8 @@ The message has exactly 5 sections:
    - `•` `:github: <URL|PR #N title> (merged/open, in image: yes/no)` — one line per PR
    - `•` When mentioning a previous build, ALWAYS link to its Slack thread permalink (e.g., `discussed in <permalink|#3905 thread>`). Get permalinks from Phase 1 thread data. Mandatory.
    - That's ALL per pattern. No "Evidence", no "Timeline", no "Recommended Actions", no terminal commands.
-4. **Trends** — one line per pattern: "Component: N→N→N (regression/stable/improving)". Only patterns that changed.
-5. **Recovery** — one line per recovered group: `:white_check_mark: Component: passing again after N builds`
+3. **Trends** — one line per pattern: "Component: N→N→N (regression/stable/improving)". Only patterns that changed.
+4. **Recovery** — one line per recovered group: `:white_check_mark: Component: passing again after N builds`
 
 **NOTHING ELSE.** No "Actions Required", no "Key Takeaways", no "Summary", no closing remarks.
 
