@@ -613,8 +613,12 @@ def build_deep_analysis_prompt(build_number: str, product: str, skip_slack: bool
             team_lines += f"\n    {test} → {mention}"
 
     jenkins_url = os.getenv("JENKINS_URL", "").strip().rstrip("/")
-    report_artifact_url = ""
-    if jenkins_url:
+    # The report is archived on the job that runs the analysis — dashboard-agentic-analysis
+    # in downstream mode, dashboard-e2e-tests in inline mode. The Jenkins library exports
+    # the exact URL as TFA_REPORT_URL; only fall back to the guessed URL when running
+    # outside the pipeline (RHOAIENG-104581).
+    report_artifact_url = os.getenv("TFA_REPORT_URL", "").strip()
+    if not report_artifact_url and jenkins_url:
         report_artifact_url = (
             f"{jenkins_url}/job/components/job/dashboard"
             f"/job/dashboard-e2e-tests/{build_number}/TFA_20Analysis/"

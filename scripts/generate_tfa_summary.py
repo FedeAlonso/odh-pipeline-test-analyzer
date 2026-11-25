@@ -176,8 +176,11 @@ def find_root_cause(test_name: str, root_causes: dict) -> str:
 def build_summary(build_number: str, product: str, report: dict, ownership: dict | None) -> str:
     name = product.upper()
     jenkins_url = os.getenv("JENKINS_URL", "").strip().rstrip("/")
-    artifact_url = ""
-    if jenkins_url:
+    # Prefer the exact URL exported by the Jenkins library (TFA_REPORT_URL) — the report
+    # is archived on the job that runs the analysis, which is not always the
+    # dashboard-e2e-tests build (RHOAIENG-104581). Fallback covers local runs.
+    artifact_url = os.getenv("TFA_REPORT_URL", "").strip()
+    if not artifact_url and jenkins_url:
         artifact_url = (
             f"{jenkins_url}/job/components/job/dashboard"
             f"/job/dashboard-e2e-tests/{build_number}/TFA_20Analysis/"
