@@ -145,7 +145,7 @@ venv/bin/python scripts/comprehensive_analysis.py <build_number|latest> <odh|rho
 ```
 Always use `-y` (auto-accept prompts) to avoid blocking on interactive input. Always download artifacts (do NOT use `--no-artifacts-download`). The HTML report embeds screenshots and videos from test failures, which are essential for debugging.
 The script handles:
-- **Jira lock check** — creates a lock ticket (`Nightly Analysis: {build}-{platform}-{date}`) in RHOAIENG to prevent duplicate runs. If the ticket already exists, prompts the user.
+- **Jira lock check** — creates a lock ticket (`Nightly Analysis: {build}-{platform}-{date}`) in RHAI to prevent duplicate runs (RHOAIENG was decommissioned in Nov 2026 — all items were moved to RHAI; never create new items in RHOAIENG). If the ticket already exists, prompts the user.
 - **11-step analysis** — fetches build data, parses test results, inspects cluster, searches Jira, reruns failing tests, downloads artifacts.
 - **Report generation** — saves markdown + HTML reports locally.
 - **Jira publish** — posts a summary comment and attaches the .md and .html reports to the lock ticket.
@@ -201,7 +201,7 @@ For **every** uninvestigated real failure, complete ALL of the following steps:
 
 7. **Previous analysis** — Search Jira for the lock ticket from the previous build to check if this same failure was already investigated. Note if it's persistent, new, or regressed.
 
-8. **Existing Jira bugs** — Search RHOAIENG project for open tickets mentioning the test name, component, or error message. For each ticket, note: key, summary, status, assignee, and any recent comments that indicate progress or a fix.
+8. **Existing Jira bugs** — Search RHAI project for open tickets mentioning the test name, component, or error message. For each ticket, note: key, summary, status, assignee, and any recent comments that indicate progress or a fix.
 
 9. **Code changes** — Search the odh-dashboard repo for recent PRs that touch the relevant test files, components, or API routes. Use `gh search code`, `gh api repos/.../commits`, and `gh pr list`. For each PR, note: title, author, merge date, and whether it could have caused the failure. Pay attention to PRs merged AFTER the operator image was built — those fixes won't be in this build.
 
@@ -235,7 +235,7 @@ python scripts/inject_deep_analysis.py \
     reports/current/{RHOAI|ODH}/latest-build-{N}.html \
     /tmp/deep_analysis.md \
     --update-md reports/current/{RHOAI|ODH}/latest-build-{N}.md \
-    --jira-ticket RHOAIENG-XXXXX
+    --jira-ticket RHAI-XXXXX
 ```
 
 The script does everything in one call:
@@ -247,7 +247,7 @@ The script does everything in one call:
 Do NOT regenerate the HTML from scratch or edit it manually — the original HTML contains embedded screenshots and videos that would be lost.
 
 ### 4d. Create Jira blocker bugs for critical failures
-When the analysis reveals a critical failure that blocks all tests (e.g., dashboard crash, operator deployment failure), create a Jira Bug in RHOAIENG with the following fields:
+When the analysis reveals a critical failure that blocks all tests (e.g., dashboard crash, operator deployment failure), create a Jira Bug in RHAI with the following fields:
 
 | Field | Value |
 |-------|-------|

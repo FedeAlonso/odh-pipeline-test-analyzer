@@ -559,7 +559,7 @@ def find_previous_build_ticket(build_number: str, product: str) -> str:
         import httpx
 
         jql = (
-            f'project = RHOAIENG AND summary ~ "Nightly Analysis" '
+            f'project = RHAI AND summary ~ "Nightly Analysis" '
             f'AND summary ~ "{name}" '
             f"ORDER BY created DESC"
         )
@@ -678,7 +678,7 @@ For each real failure listed above, do ALL of the following (skip nothing):
 1e. Use K8s MCP tools to check pod health in redhat-ods-applications and redhat-ods-operator.
 1f. Check operator age/version — use tracer output or `oc get csv` in redhat-ods-operator.
 1g. Search Jira: read {prev_ticket or 'the previous build ticket'} comments for this same failure.
-1h. Search RHOAIENG for open bugs mentioning this test name or error. Note key, status, assignee.
+1h. Search RHAI for open bugs mentioning this test name or error. Note key, status, assignee.
 1i. Search odh-dashboard repo for recent PRs touching the test file or related components. Use `gh pr list` and `gh api repos/opendatahub-io/odh-dashboard/commits`.
 1j. Read the test source in the odh-dashboard repo: frontend/src/__tests__/cypress/cypress/tests/e2e/
 

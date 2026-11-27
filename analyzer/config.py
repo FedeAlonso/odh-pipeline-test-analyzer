@@ -35,7 +35,7 @@ class Config:
     JIRA_URL = os.getenv("JIRA_URL", "https://issues.redhat.com")
     JIRA_USER = os.getenv("JIRA_USER", "")
     JIRA_TOKEN = os.getenv("JIRA_TOKEN", "")
-    JIRA_LOCK_PROJECT = os.getenv("JIRA_LOCK_PROJECT", "RHOAIENG")
+    JIRA_LOCK_PROJECT = os.getenv("JIRA_LOCK_PROJECT", "RHAI")
 
     # GitLab Configuration
     GITLAB_URL = os.getenv("GITLAB_URL", "https://gitlab.cee.redhat.com")
