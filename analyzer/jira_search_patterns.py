@@ -498,7 +498,7 @@ class JiraSearchMatcher:
                     "name": f"{pattern.name}",
                     "description": f"Search for: {keyword}",
                     "query": keyword,
-                    "jql": f"project = RHOAIENG AND type = Bug AND text ~ \"{keyword}\"{components_filter} ORDER BY priority DESC, updated DESC",
+                    "jql": f"project = RHAI AND type = Bug AND text ~ \"{keyword}\"{components_filter} ORDER BY priority DESC, updated DESC",
                     "components": pattern.jira_components,
                     "priority": pattern.priority
                 }
@@ -515,7 +515,7 @@ class JiraSearchMatcher:
                     "name": "Generic Error Search",
                     "description": f"Search for error: {keyword}",
                     "query": keyword,
-                    "jql": f"project = RHOAIENG AND text ~ \"{keyword}\" ORDER BY priority DESC, updated DESC",
+                    "jql": f"project = RHAI AND text ~ \"{keyword}\" ORDER BY priority DESC, updated DESC",
                     "components": [],
                     "priority": 5
                 })

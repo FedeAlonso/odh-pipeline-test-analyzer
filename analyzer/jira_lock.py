@@ -12,11 +12,6 @@ import httpx
 
 from .config import Config
 
-_GIT_PR_NOT_APPLICABLE = {
-    "type": "doc", "version": 1,
-    "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Not Applicable"}]}],
-}
-
 
 def _auth():
     if Config.JIRA_USER:
@@ -34,7 +29,7 @@ def _headers():
 async def search_lock_ticket(
     build_num: int,
     platform: str,
-    project: str = "RHOAIENG",
+    project: str = "RHAI",
 ) -> Optional[Dict[str, Any]]:
     base_url = Config.JIRA_URL.rstrip('/')
     expected_prefix = f"Nightly Analysis: {build_num}-{platform}"
@@ -65,7 +60,7 @@ async def create_lock_ticket(
     build_num: int,
     platform: str,
     build_date_str: str,
-    project: str = "RHOAIENG",
+    project: str = "RHAI",
 ) -> Optional[Dict[str, Any]]:
     base_url = Config.JIRA_URL.rstrip('/')
     summary = f"Nightly Analysis: {build_num}-{platform}-{build_date_str}"
@@ -76,6 +71,8 @@ async def create_lock_ticket(
         f"Build: #{build_num}\nPlatform: {platform}"
     )
 
+    # NOTE: RHOAIENG's mandatory "Git PR" field (customfield_10875) does not
+    # exist in the RHAI project — do not send it (RHAI-79327 migration, Nov 2026).
     payload = {
         "fields": {
             "project": {"key": project},
@@ -87,7 +84,6 @@ async def create_lock_ticket(
             },
             "issuetype": {"name": "Task"},
             "labels": ["nightly-analysis"],
-            "customfield_10875": _GIT_PR_NOT_APPLICABLE,
         }
     }
 
@@ -110,13 +106,6 @@ async def create_lock_ticket(
 async def _close_ticket(issue_key: str) -> bool:
     base_url = Config.JIRA_URL.rstrip('/')
     async with httpx.AsyncClient(verify=Config.SSL_VERIFY, timeout=30.0) as client:
-        await client.put(
-            f"{base_url}/rest/api/3/issue/{issue_key}",
-            headers=_headers(),
-            auth=_auth(),
-            json={"fields": {"customfield_10875": _GIT_PR_NOT_APPLICABLE}},
-        )
-
         resp = await client.get(
             f"{base_url}/rest/api/3/issue/{issue_key}/transitions",
             headers=_headers(),

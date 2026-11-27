@@ -53,7 +53,7 @@ class JiraClient:
     async def search_issues(
         self,
         test_name: str,
-        project: str = "RHOAIENG",
+        project: str = "RHAI",
         max_results: int = 5
     ) -> List[Dict[str, Any]]:
         search_terms = self._extract_search_terms(test_name)
@@ -136,7 +136,7 @@ class JiraClient:
     async def search_by_error_message(
         self,
         error_message: str,
-        project: str = "RHOAIENG",
+        project: str = "RHAI",
         max_results: int = 3
     ) -> List[Dict[str, Any]]:
         error_parts = self._extract_error_signature(error_message)

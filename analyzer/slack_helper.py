@@ -181,7 +181,7 @@ def extract_investigation_context(
     """Extract investigation notes, PR links, and Jira references from thread replies."""
     context = []
     author_pattern = re.compile(r'\[\d+\.\d+\]\s+@([^:]+):\s*(.*)', re.DOTALL)
-    jira_pattern = re.compile(r'(RHOAIENG-\d+)', re.IGNORECASE)
+    jira_pattern = re.compile(r'((?:RHOAIENG|RHAI)-\d+)', re.IGNORECASE)
     pr_pattern = re.compile(r'(github\.com/[^\s>|]+/pull/\d+)', re.IGNORECASE)
     relevant_patterns = [
         pr_pattern,
@@ -197,7 +197,7 @@ def extract_investigation_context(
         text = match.group(2).strip()
         if _is_bulk_failure_list(text):
             continue
-        if re.search(r'Full analysis report attached to\s+RHOAIENG-', text, re.IGNORECASE):
+        if re.search(r'Full analysis report attached to\s+(?:RHOAIENG|RHAI)-', text, re.IGNORECASE):
             continue
         if re.match(r'^\*?NOTE:\s*_This is an Agentic-AI generated', text):
             continue
@@ -391,7 +391,7 @@ def _synthesize_notes(
         if re.match(r'^same\s+(?:issues?|errors?|failures?)\s+as\s+(?:yesterday|before|last)', text, re.IGNORECASE):
             continue
         text = re.sub(r'(?:PR\s+)?https?://\S+(?:\s+(?:might|should|could|will|would)\s+\w+\s+it)?', '', text).strip()
-        text = re.sub(r'RHOAIENG-\d+\s*(?:created|tracks?\s+(?:the\s+)?(?:fix|issue|bug))?\.?\s*', '', text).strip()
+        text = re.sub(r'(?:RHOAIENG|RHAI)-\d+\s*(?:created|tracks?\s+(?:the\s+)?(?:fix|issue|bug))?\.?\s*', '', text).strip()
         text = re.sub(r'\b(?:See|see|check|Check)\s+for\s+(?:details|more\s+info|context)\.?', '', text).strip()
         text = re.sub(r'\s{2,}', ' ', text).strip()
         text = re.sub(r'[\s.,;:—\-]+$', '', text).strip()
@@ -711,7 +711,7 @@ def compose_slack_message(
 
 def collect_jira_keys(thread_data: Dict[str, List[str]]) -> List[str]:
     """Extract all unique Jira ticket keys referenced across thread messages."""
-    jira_pattern = re.compile(r'(RHOAIENG-\d+)', re.IGNORECASE)
+    jira_pattern = re.compile(r'((?:RHOAIENG|RHAI)-\d+)', re.IGNORECASE)
     keys = set()
     for messages in thread_data.values():
         for msg in messages:
